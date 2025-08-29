@@ -355,7 +355,7 @@ if ($_POST) {
                         <div class="role-title">Risk Owner</div>
                     </label>
                     <label class="role-card" for="role_compliance">
-                        <input type="radio" id="role_compliance" name="role" value="compliance" <?php echo (isset($_POST['role']) && $_POST['role'] === 'compliance') ? 'checked' : ''; ?> onchange="toggleRoleFields()">
+                        <input type="radio" id="role_compliance" name="role" value="compliance_team" <?php echo (isset($_POST['role']) && $_POST['role'] === 'compliance') ? 'checked' : ''; ?> onchange="toggleRoleFields()">
                         <div class="role-title">Compliance</div>
                     </label>
                     <label class="role-card" for="role_admin">

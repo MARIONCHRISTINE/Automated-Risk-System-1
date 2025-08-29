@@ -22,6 +22,9 @@ function requireRole($role) {
             case 'staff':
                 header('Location: staff_dashboard.php');
                 break;
+            case 'compliance_team':
+                header('Location: compliance_dashboard.php');
+                break;
             default:
                 header('Location: login.php');
                 break;
@@ -43,6 +46,9 @@ function requireAnyRole($roles) {
                 break;
             case 'staff':
                 header('Location: staff_dashboard.php');
+                break;
+            case 'compliance_team':
+                header('Location: compliance_dashboard.php');
                 break;
             default:
                 header('Location: login.php');

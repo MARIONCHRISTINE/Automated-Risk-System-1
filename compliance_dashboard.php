@@ -6,6 +6,11 @@ include_once 'config/database.php';
 $database = new Database();
 $db = $database->getConnection();
 
+$dept_query = "SELECT DISTINCT department FROM risk_incidents WHERE department IS NOT NULL ORDER BY department";
+$dept_stmt = $db->prepare($dept_query);
+$dept_stmt->execute();
+$departments = $dept_stmt->fetchAll(PDO::FETCH_COLUMN);
+
 // Get all risks for compliance overview with enhanced data
 $query = "SELECT r.*, u.full_name as reporter_name, ro.full_name as owner_name,
           DATEDIFF(NOW(), r.created_at) as days_open,
@@ -21,6 +26,15 @@ $query = "SELECT r.*, u.full_name as reporter_name, ro.full_name as owner_name,
 $stmt = $db->prepare($query);
 $stmt->execute();
 $all_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$recent_risks_query = "SELECT r.*, u.full_name as reporter_name, ro.full_name as owner_name
+                       FROM risk_incidents r 
+                       LEFT JOIN users u ON r.reported_by = u.id 
+                       LEFT JOIN users ro ON r.risk_owner_id = ro.id 
+                       ORDER BY r.created_at DESC LIMIT 10";
+$recent_stmt = $db->prepare($recent_risks_query);
+$recent_stmt->execute();
+$recent_risks = $recent_stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Get enhanced risk statistics
 $stats_query = "SELECT 
@@ -125,6 +139,52 @@ function detectSimilarRisks($risks) {
 }
 
 $riskGroups = detectSimilarRisks($all_risks);
+
+// Get real heat map data by department and risk level
+$heatmap_query = "SELECT 
+    department,
+    risk_level,
+    COUNT(*) as risk_count
+    FROM risk_incidents 
+    WHERE department IS NOT NULL AND risk_level IS NOT NULL
+    GROUP BY department, risk_level
+    ORDER BY department, 
+    CASE risk_level 
+        WHEN 'Low' THEN 1 
+        WHEN 'Medium' THEN 2 
+        WHEN 'High' THEN 3 
+        WHEN 'Critical' THEN 4 
+    END";
+$heatmap_stmt = $db->prepare($heatmap_query);
+$heatmap_stmt->execute();
+$heatmap_data = $heatmap_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get monthly trends data for the last 6 months
+$trends_query = "SELECT 
+    DATE_FORMAT(created_at, '%Y-%m') as month,
+    risk_level,
+    COUNT(*) as count
+    FROM risk_incidents 
+    WHERE created_at >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+    GROUP BY DATE_FORMAT(created_at, '%Y-%m'), risk_level
+    ORDER BY month";
+$trends_stmt = $db->prepare($trends_query);
+$trends_stmt->execute();
+$trends_data = $trends_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get department analysis data
+$dept_analysis_query = "SELECT 
+    department,
+    COUNT(*) as total_risks,
+    SUM(CASE WHEN risk_level = 'Critical' THEN 1 ELSE 0 END) as critical_risks,
+    SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed_risks
+    FROM risk_incidents 
+    WHERE department IS NOT NULL
+    GROUP BY department
+    ORDER BY total_risks DESC";
+$dept_analysis_stmt = $db->prepare($dept_analysis_query);
+$dept_analysis_stmt->execute();
+$dept_analysis_data = $dept_analysis_stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
 <!DOCTYPE html>
@@ -1017,6 +1077,81 @@ $riskGroups = detectSimilarRisks($all_risks);
     .card::-webkit-scrollbar {
         display: none; /* WebKit */
     }
+
+    /* Added print styles for risk details */
+    @media print {
+        .no-print {
+            display: none !important;
+        }
+        
+        .print-only {
+            display: block !important;
+        }
+        
+        body {
+            padding-top: 0 !important;
+        }
+        
+        .header, .nav {
+            display: none !important;
+        }
+        
+        .main-content {
+            padding: 0 !important;
+            max-height: none !important;
+        }
+    }
+    
+    .print-only {
+        display: none;
+    }
+    
+    /* Added styles for enhanced filters */
+    .filter-section {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 8px;
+        margin-bottom: 1.5rem;
+        border: 1px solid #e9ecef;
+    }
+    
+    .filter-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+    
+    .filter-group {
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .filter-label {
+        font-weight: 500;
+        color: #495057;
+        margin-bottom: 0.5rem;
+        font-size: 0.9rem;
+    }
+    
+    .filter-input {
+        padding: 0.5rem;
+        border: 1px solid #e9ecef;
+        border-radius: 6px;
+        font-size: 0.9rem;
+    }
+    
+    .action-buttons {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+    }
+    
+    .btn-sm {
+        padding: 0.4rem 0.8rem;
+        font-size: 0.85rem;
+        border-radius: 4px;
+    }
 </style>
 </head>
 <body>
@@ -1181,55 +1316,99 @@ $riskGroups = detectSimilarRisks($all_risks);
 
         <!-- Risk Tracking Tab -->
         <div id="tracking" class="tab-content">
-            <!-- Implemented comprehensive Risk Tracking with database integration -->
-            <!-- Risk Level Distribution Cards - FIXED -->
-            <div class="risk-level-grid">
-                <div class="risk-level-card" style="border-top: 4px solid #dc3545;">
-                    <h3 style="color: #dc3545;"><?php echo $stats['critical_risks']; ?></h3>
-                    <p>Critical Risks</p>
-                    <small>Immediate attention required</small>
+            <!-- Updated Risk Level Distribution Cards to match overview tab styling -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number" style="color: #dc3545;"><?php echo $stats['critical_risks']; ?></div>
+                    <div class="stat-label">Critical Risks</div>
+                    <div class="stat-description">Immediate attention required</div>
                 </div>
-                <div class="risk-level-card" style="border-top: 4px solid #fd7e14;">
-                    <h3 style="color: #fd7e14;"><?php echo $stats['high_risks']; ?></h3>
-                    <p>High Risks</p>
-                    <small>Priority monitoring needed</small>
+                <div class="stat-card">
+                    <div class="stat-number" style="color: #fd7e14;"><?php echo $stats['high_risks']; ?></div>
+                    <div class="stat-label">High Risks</div>
+                    <div class="stat-description">Priority monitoring needed</div>
                 </div>
-                <div class="risk-level-card" style="border-top: 4px solid #ffc107;">
-                    <h3 style="color: #ffc107;"><?php echo $stats['medium_risks']; ?></h3>
-                    <p>Medium Risks</p>
-                    <small>Regular monitoring</small>
+                <div class="stat-card">
+                    <div class="stat-number" style="color: #ffc107;"><?php echo $stats['medium_risks']; ?></div>
+                    <div class="stat-label">Medium Risks</div>
+                    <div class="stat-description">Regular monitoring</div>
                 </div>
-                <div class="risk-level-card" style="border-top: 4px solid #28a745;">
-                    <h3 style="color: #28a745;"><?php echo $stats['low_risks']; ?></h3>
-                    <p>Low Risks</p>
-                    <small>Minimal oversight needed</small>
+                <div class="stat-card">
+                    <div class="stat-number" style="color: #28a745;"><?php echo $stats['low_risks']; ?></div>
+                    <div class="stat-label">Low Risks</div>
+                    <div class="stat-description">Minimal oversight needed</div>
                 </div>
             </div>
 
-            <!-- All Risks Table with Filters -->
-            <div style="background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-top: 4px solid #E60012;">
-                <div style="display: flex; justify-content: between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem;">
-                    <h3 style="margin: 0; color: #495057; font-size: 1.3rem; font-weight: 600;">All Risks in System</h3>
-                    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
-                        <select onchange="filterRisks(this.value)" style="padding: 0.5rem; border: 1px solid #e9ecef; border-radius: 6px;">
+            <!-- Enhanced Filters Section -->
+            <div class="filter-section no-print">
+                <h4 style="margin: 0 0 1rem 0; color: #495057;">🔍 Filter Risks</h4>
+                <div class="filter-row">
+                    <div class="filter-group">
+                        <label class="filter-label">Search by Risk ID</label>
+                        <input type="text" id="searchRiskId" class="filter-input" placeholder="Enter Risk ID..." onkeyup="filterByRiskId(this.value)">
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Department</label>
+                        <select id="departmentFilter" class="filter-input" onchange="filterRisks(this.value)">
                             <option value="all">All Departments</option>
-                            <option value="IT">IT</option>
-                            <option value="Finance">Finance</option>
-                            <option value="Operations">Operations</option>
-                            <option value="Customer Service">Customer Service</option>
+                            <?php foreach ($departments as $dept): ?>
+                            <option value="<?php echo htmlspecialchars($dept); ?>"><?php echo htmlspecialchars($dept); ?></option>
+                            <?php endforeach; ?>
                         </select>
-                        <select onchange="filterByRiskLevel(this.value)" style="padding: 0.5rem; border: 1px solid #e9ecef; border-radius: 6px;">
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Risk Level</label>
+                        <select id="riskLevelFilter" class="filter-input" onchange="filterByRiskLevel(this.value)">
                             <option value="all">All Risk Levels</option>
                             <option value="Critical">Critical</option>
                             <option value="High">High</option>
                             <option value="Medium">Medium</option>
                             <option value="Low">Low</option>
                         </select>
-                        <select onchange="filterByBoardReporting(this.value)" style="padding: 0.5rem; border: 1px solid #e9ecef; border-radius: 6px;">
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Board Reporting</label>
+                        <select id="boardFilter" class="filter-input" onchange="filterByBoardReporting(this.value)">
                             <option value="all">All Risks</option>
-                            <option value="YES">Board Reported</option>
-                            <option value="NO">Not Board Reported</option>
+                            <option value="YES">Report to Board</option>
+                            <option value="NO">Not Report to Board</option>
                         </select>
+                    </div>
+                </div>
+                <div class="filter-row">
+                    <div class="filter-group">
+                        <label class="filter-label">Date From</label>
+                        <input type="date" id="dateFrom" class="filter-input" onchange="filterByDateRange()">
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Date To</label>
+                        <input type="date" id="dateTo" class="filter-input" onchange="filterByDateRange()">
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label">Actions</label>
+                        <div class="action-buttons">
+                            <button onclick="clearAllFilters()" class="btn btn-secondary btn-sm">Clear Filters</button>
+                            <button onclick="exportFilteredRisks('pdf')" class="btn btn-danger btn-sm">📄 Export PDF</button>
+                            <button onclick="exportFilteredRisks('excel')" class="btn btn-success btn-sm">📊 Export Excel</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Updated Risks Table with View All button and last 10 risks display -->
+            <div style="background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-top: 4px solid #E60012;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem;">
+                    <h3 style="margin: 0; color: #495057; font-size: 1.3rem; font-weight: 600;">
+                        <span id="tableTitle">Recent Risks (Last 10)</span>
+                    </h3>
+                    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                        <button id="viewAllBtn" onclick="toggleViewAll()" class="btn btn-primary" style="padding: 0.5rem 1rem;">
+                            View All Risks
+                        </button>
+                        <button onclick="printRisksTable()" class="btn btn-secondary no-print" style="padding: 0.5rem 1rem;">
+                            🖨️ Print Table
+                        </button>
                     </div>
                 </div>
                 
@@ -1237,22 +1416,27 @@ $riskGroups = detectSimilarRisks($all_risks);
                     <table id="risksTable" style="width: 100%; border-collapse: collapse;">
                         <thead>
                             <tr style="background: #f8f9fa; border-bottom: 2px solid #e9ecef;">
-                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: #495057;">Risk ID</th>
-                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: #495057;">Risk Name</th>
-                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: #495057;">Risk Level</th>
-                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: #495057;">Status</th>
-                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: #495057;">Department</th>
-                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: #495057;">Board Report</th>
-                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: #495057;">Actions</th>
+                                <!-- Changed table header text color from #495057 to white -->
+                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: white; background: #495057;">Risk ID</th>
+                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: white; background: #495057;">Risk Name</th>
+                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: white; background: #495057;">Risk Level</th>
+                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: white; background: #495057;">Status</th>
+                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: white; background: #495057;">Department</th>
+                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: white; background: #495057;">Date Created</th>
+                                <th style="padding: 1rem; text-align: left; font-weight: 600; color: white; background: #495057;">Board Report</th>
+                                <!-- Removed the Actions column with View Details and Print buttons -->
                             </tr>
                         </thead>
-                        <tbody>
-                            <?php foreach ($all_risks as $risk): ?>
-                            <tr data-department="<?php echo htmlspecialchars($risk['department']); ?>" 
+                        <tbody id="risksTableBody">
+                            <!-- Initial display shows last 10 risks -->
+                            <?php foreach ($recent_risks as $risk): ?>
+                            <tr data-risk-id="<?php echo htmlspecialchars($risk['id']); ?>"
+                                data-department="<?php echo htmlspecialchars($risk['department']); ?>" 
                                 data-risk-level="<?php echo htmlspecialchars($risk['risk_level']); ?>"
                                 data-board="<?php echo htmlspecialchars($risk['to_be_reported_to_board'] ?? 'NO'); ?>"
+                                data-created="<?php echo htmlspecialchars($risk['created_at']); ?>"
                                 style="border-bottom: 1px solid #e9ecef;">
-                                <td style="padding: 1rem; color: #495057;"><?php echo htmlspecialchars($risk['id']); ?></td>
+                                <td style="padding: 1rem; color: #495057; font-weight: 500;"><?php echo htmlspecialchars($risk['id']); ?></td>
                                 <td style="padding: 1rem; color: #495057; font-weight: 500;"><?php echo htmlspecialchars($risk['risk_name']); ?></td>
                                 <td style="padding: 1rem;">
                                     <?php 
@@ -1274,6 +1458,7 @@ $riskGroups = detectSimilarRisks($all_risks);
                                     </span>
                                 </td>
                                 <td style="padding: 1rem; color: #495057;"><?php echo htmlspecialchars($risk['department']); ?></td>
+                                <td style="padding: 1rem; color: #495057;"><?php echo date('M j, Y', strtotime($risk['created_at'])); ?></td>
                                 <td style="padding: 1rem;">
                                     <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
                                         <input type="checkbox" <?php echo ($risk['to_be_reported_to_board'] == 'YES') ? 'checked' : ''; ?> 
@@ -1282,12 +1467,7 @@ $riskGroups = detectSimilarRisks($all_risks);
                                         <span style="font-size: 0.9rem; color: #495057;">Report to Board</span>
                                     </label>
                                 </td>
-                                <td style="padding: 1rem;">
-                                    <button onclick="viewRiskDetails(<?php echo $risk['id']; ?>)" 
-                                            style="padding: 0.5rem 1rem; background: #E60012; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
-                                        View Details
-                                    </button>
-                                </td>
+                                <!-- Removed the Actions column with View Details and Print buttons -->
                             </tr>
                             <?php endforeach; ?>
                         </tbody>
@@ -1326,10 +1506,9 @@ $riskGroups = detectSimilarRisks($all_risks);
                         <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #495057;">Department:</label>
                         <select id="reportDepartment" style="width: 100%; padding: 0.75rem; border: 1px solid #e9ecef; border-radius: 6px;">
                             <option value="all">All Departments</option>
-                            <option value="IT">IT</option>
-                            <option value="Finance">Finance</option>
-                            <option value="Operations">Operations</option>
-                            <option value="Customer Service">Customer Service</option>
+                            <?php foreach($departments as $dept): ?>
+                            <option value="<?php echo htmlspecialchars($dept); ?>"><?php echo htmlspecialchars($dept); ?></option>
+                            <?php endforeach; ?>
                         </select>
                     </div>
                     
@@ -1492,6 +1671,22 @@ $riskGroups = detectSimilarRisks($all_risks);
         </div>
     </main>
     
+    <!-- Enhanced Risk Details Modal with full information -->
+    <div id="riskDetailsModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000;">
+        <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; border-radius: 12px; width: 95%; max-width: 1000px; max-height: 90%; overflow-y: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.3);">
+            <div style="padding: 2rem; border-bottom: 1px solid #e9ecef; display: flex; justify-content: space-between; align-items: center; background: #f8f9fa; border-radius: 12px 12px 0 0;">
+                <h3 style="margin: 0; color: #495057;">Complete Risk Details</h3>
+                <div style="display: flex; gap: 1rem; align-items: center;">
+                    <button onclick="printRiskDetails()" class="btn btn-secondary btn-sm no-print">🖨️ Print Details</button>
+                    <button onclick="closeRiskDetailsModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #6c757d;">&times;</button>
+                </div>
+            </div>
+            <div id="riskDetailsContent" style="padding: 2rem;">
+                <!-- Full risk details will be loaded here -->
+            </div>
+        </div>
+    </div>
+
     <!-- Risk Details Modal -->
     <div id="riskModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000;">
         <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; border-radius: 8px; width: 90%; max-width: 800px; max-height: 90%; overflow-y: auto;">
@@ -1781,28 +1976,32 @@ $riskGroups = detectSimilarRisks($all_risks);
     }
 
     function initializeAnalyticsCharts() {
-        // Risk Heat Map
         const heatMapCanvas = document.getElementById('riskHeatMap');
         if (heatMapCanvas) {
             const ctx = heatMapCanvas.getContext('2d');
             const width = heatMapCanvas.width = heatMapCanvas.offsetWidth;
             const height = heatMapCanvas.height = 400;
             
-            // Draw heat map grid
-            const departments = ['IT', 'Finance', 'Operations', 'Customer Service'];
+            // Real departments and risk levels from database
+            const departments = <?php echo json_encode($departments); ?>;
             const riskLevels = ['Low', 'Medium', 'High', 'Critical'];
             const cellWidth = width / departments.length;
             const cellHeight = height / riskLevels.length;
             
-            // Sample heat map data (you can replace with real data)
-            const heatData = [
-                [2, 5, 3, 1], // IT
-                [1, 3, 2, 0], // Finance
-                [3, 4, 2, 1], // Operations
-                [1, 2, 1, 0]  // Customer Service
-            ];
+            // Real heat map data from database
+            const heatMapData = <?php echo json_encode($heatmap_data); ?>;
             
-            const maxValue = Math.max(...heatData.flat());
+            // Create heat data matrix
+            const heatData = [];
+            departments.forEach((dept, deptIndex) => {
+                heatData[deptIndex] = [];
+                riskLevels.forEach((level, levelIndex) => {
+                    const dataPoint = heatMapData.find(d => d.department === dept && d.risk_level === level);
+                    heatData[deptIndex][levelIndex] = dataPoint ? parseInt(dataPoint.risk_count) : 0;
+                });
+            });
+            
+            const maxValue = Math.max(...heatData.flat()) || 1;
             
             departments.forEach((dept, deptIndex) => {
                 riskLevels.forEach((level, levelIndex) => {
@@ -1811,10 +2010,25 @@ $riskGroups = detectSimilarRisks($all_risks);
                     const value = heatData[deptIndex][levelIndex];
                     const intensity = value / maxValue;
                     
-                    // Color based on intensity
-                    const red = Math.floor(230 * intensity + 25);
-                    const green = Math.floor(25 + (1 - intensity) * 100);
-                    const blue = 25;
+                    // Color based on intensity and risk level
+                    let red, green, blue;
+                    if (levelIndex === 3) { // Critical
+                        red = Math.floor(220 + intensity * 35);
+                        green = Math.floor(20 + (1 - intensity) * 30);
+                        blue = 20;
+                    } else if (levelIndex === 2) { // High
+                        red = Math.floor(255 * intensity + 100);
+                        green = Math.floor(140 + (1 - intensity) * 50);
+                        blue = 20;
+                    } else if (levelIndex === 1) { // Medium
+                        red = Math.floor(255 * intensity + 50);
+                        green = Math.floor(193 + (1 - intensity) * 30);
+                        blue = Math.floor(7 + intensity * 20);
+                    } else { // Low
+                        red = Math.floor(40 + intensity * 60);
+                        green = Math.floor(167 + intensity * 50);
+                        blue = Math.floor(69 + intensity * 30);
+                    }
                     
                     ctx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
                     ctx.fillRect(x, y, cellWidth, cellHeight);
@@ -1834,12 +2048,13 @@ $riskGroups = detectSimilarRisks($all_risks);
             
             // Draw labels
             ctx.fillStyle = '#495057';
-            ctx.font = '14px Arial';
+            ctx.font = '12px Arial';
             ctx.textAlign = 'center';
             
-            // Department labels
+            // Department labels (truncate long names)
             departments.forEach((dept, index) => {
-                ctx.fillText(dept, index * cellWidth + cellWidth/2, height + 20);
+                const truncatedDept = dept.length > 12 ? dept.substring(0, 12) + '...' : dept;
+                ctx.fillText(truncatedDept, index * cellWidth + cellWidth/2, height + 20);
             });
             
             // Risk level labels
@@ -1849,322 +2064,491 @@ $riskGroups = detectSimilarRisks($all_risks);
             });
         }
         
-        // Risk Trends Chart
         const trendsCanvas = document.getElementById('riskTrendsChart');
         if (trendsCanvas) {
             const ctx = trendsCanvas.getContext('2d');
             const width = trendsCanvas.width = trendsCanvas.offsetWidth;
             const height = trendsCanvas.height = 300;
             
-            // Sample trend data (replace with real data)
-            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'];
-            const criticalTrend = [2, 3, 1, 4, 2, 1];
-            const highTrend = [5, 4, 6, 3, 5, 4];
+            // Real trends data from database
+            const trendsData = <?php echo json_encode($trends_data); ?>;
+            
+            // Get last 6 months
+            const months = [];
+            const criticalTrend = [];
+            const highTrend = [];
+            const totalTrend = [];
+            
+            for (let i = 5; i >= 0; i--) {
+                const date = new Date();
+                date.setMonth(date.getMonth() - i);
+                const monthKey = date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0');
+                const monthLabel = date.toLocaleDateString('en-US', { month: 'short' });
+                months.push(monthLabel);
+                
+                const criticalCount = trendsData.filter(d => d.month === monthKey && d.risk_level === 'Critical').reduce((sum, d) => sum + parseInt(d.count), 0);
+                const highCount = trendsData.filter(d => d.month === monthKey && d.risk_level === 'High').reduce((sum, d) => sum + parseInt(d.count), 0);
+                const totalCount = trendsData.filter(d => d.month === monthKey).reduce((sum, d) => sum + parseInt(d.count), 0);
+                
+                criticalTrend.push(criticalCount);
+                highTrend.push(highCount);
+                totalTrend.push(totalCount);
+            }
+            
+            const maxValue = Math.max(...totalTrend) || 1;
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, width, height);
+            
+            // Draw grid lines
+            ctx.strokeStyle = '#e9ecef';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 5; i++) {
+                const y = (height * 0.8 / 5) * i + 20;
+                ctx.beginPath();
+                ctx.moveTo(40, y);
+                ctx.lineTo(width - 20, y);
+                ctx.stroke();
+            }
             
             // Draw trend lines
-            ctx.strokeStyle = '#dc3545';
-            ctx.lineWidth = 3;
-            ctx.beginPath();
-            criticalTrend.forEach((value, index) => {
-                const x = (width / (months.length - 1)) * index;
-                const y = height - (value / 6) * height * 0.8;
-                if (index === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            });
-            ctx.stroke();
+            function drawTrendLine(data, color, label) {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                data.forEach((value, index) => {
+                    const x = 40 + ((width - 60) / (months.length - 1)) * index;
+                    const y = height - 40 - (value / maxValue) * (height * 0.6);
+                    if (index === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+                
+                // Draw points
+                ctx.fillStyle = color;
+                data.forEach((value, index) => {
+                    const x = 40 + ((width - 60) / (months.length - 1)) * index;
+                    const y = height - 40 - (value / maxValue) * (height * 0.6);
+                    ctx.beginPath();
+                    ctx.arc(x, y, 4, 0, 2 * Math.PI);
+                    ctx.fill();
+                });
+            }
             
-            ctx.strokeStyle = '#fd7e14';
-            ctx.beginPath();
-            highTrend.forEach((value, index) => {
-                const x = (width / (months.length - 1)) * index;
-                const y = height - (value / 6) * height * 0.8;
-                if (index === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+            drawTrendLine(criticalTrend, '#dc3545', 'Critical');
+            drawTrendLine(highTrend, '#fd7e14', 'High');
+            drawTrendLine(totalTrend, '#007bff', 'Total');
+            
+            // Draw labels
+            ctx.fillStyle = '#495057';
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'center';
+            months.forEach((month, index) => {
+                const x = 40 + ((width - 60) / (months.length - 1)) * index;
+                ctx.fillText(month, x, height - 10);
             });
-            ctx.stroke();
+            
+            // Draw legend
+            const legendItems = [
+                { color: '#dc3545', label: 'Critical' },
+                { color: '#fd7e14', label: 'High' },
+                { color: '#007bff', label: 'Total' }
+            ];
+            legendItems.forEach((item, index) => {
+                const x = width - 120 + (index * 40);
+                ctx.fillStyle = item.color;
+                ctx.fillRect(x, 10, 15, 3);
+                ctx.fillStyle = '#495057';
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'left';
+                ctx.fillText(item.label, x, 25);
+            });
         }
         
-        // Department Chart
         const deptCanvas = document.getElementById('departmentChart');
         if (deptCanvas) {
             const ctx = deptCanvas.getContext('2d');
             const width = deptCanvas.width = deptCanvas.offsetWidth;
             const height = deptCanvas.height = 300;
             
-            // Sample department data
-            const deptData = [
-                { name: 'IT', risks: <?php echo array_sum(array_map(function($r) { return $r['department'] == 'IT' ? 1 : 0; }, $all_risks)); ?> },
-                { name: 'Finance', risks: <?php echo array_sum(array_map(function($r) { return $r['department'] == 'Finance' ? 1 : 0; }, $all_risks)); ?> },
-                { name: 'Operations', risks: <?php echo array_sum(array_map(function($r) { return $r['department'] == 'Operations' ? 1 : 0; }, $all_risks)); ?> },
-                { name: 'Customer Service', risks: <?php echo array_sum(array_map(function($r) { return $r['department'] == 'Customer Service' ? 1 : 0; }, $all_risks)); ?> }
-            ];
+            // Real department data from database
+            const deptData = <?php echo json_encode($dept_analysis_data); ?>;
             
-            const maxRisks = Math.max(...deptData.map(d => d.risks));
-            const barWidth = width / deptData.length * 0.8;
-            const barSpacing = width / deptData.length * 0.2;
-            
-            deptData.forEach((dept, index) => {
-                const x = index * (barWidth + barSpacing) + barSpacing/2;
-                const barHeight = (dept.risks / maxRisks) * height * 0.8;
-                const y = height - barHeight;
+            if (deptData.length > 0) {
+                const maxRisks = Math.max(...deptData.map(d => parseInt(d.total_risks))) || 1;
+                const barWidth = (width - 80) / deptData.length * 0.6;
+                const barSpacing = (width - 80) / deptData.length * 0.4;
                 
-                ctx.fillStyle = '#E60012';
-                ctx.fillRect(x, y, barWidth, barHeight);
+                // Clear canvas
+                ctx.clearRect(0, 0, width, height);
                 
-                // Draw labels
-                ctx.fillStyle = '#495057';
-                ctx.font = '12px Arial';
-                ctx.textAlign = 'center';
-                ctx.fillText(dept.name, x + barWidth/2, height - 5);
-                ctx.fillText(dept.risks, x + barWidth/2, y - 5);
-            });
+                deptData.forEach((dept, index) => {
+                    const x = 40 + index * (barWidth + barSpacing) + barSpacing/2;
+                    const totalHeight = (parseInt(dept.total_risks) / maxRisks) * (height * 0.6);
+                    const criticalHeight = (parseInt(dept.critical_risks) / maxRisks) * (height * 0.6);
+                    const closedHeight = (parseInt(dept.closed_risks) / maxRisks) * (height * 0.6);
+                    
+                    const y = height - 60;
+                    
+                    // Draw total risks bar
+                    ctx.fillStyle = '#007bff';
+                    ctx.fillRect(x, y - totalHeight, barWidth * 0.3, totalHeight);
+                    
+                    // Draw critical risks bar
+                    ctx.fillStyle = '#dc3545';
+                    ctx.fillRect(x + barWidth * 0.35, y - criticalHeight, barWidth * 0.3, criticalHeight);
+                    
+                    // Draw closed risks bar
+                    ctx.fillStyle = '#28a745';
+                    ctx.fillRect(x + barWidth * 0.7, y - closedHeight, barWidth * 0.3, closedHeight);
+                    
+                    // Draw department name (truncated)
+                    ctx.fillStyle = '#495057';
+                    ctx.font = '10px Arial';
+                    ctx.textAlign = 'center';
+                    const truncatedName = dept.department.length > 10 ? dept.department.substring(0, 10) + '...' : dept.department;
+                    ctx.fillText(truncatedName, x + barWidth/2, height - 35);
+                    
+                    // Draw values
+                    ctx.font = '9px Arial';
+                    ctx.fillText(dept.total_risks, x + barWidth * 0.15, y - totalHeight - 5);
+                    ctx.fillText(dept.critical_risks, x + barWidth * 0.5, y - criticalHeight - 5);
+                    ctx.fillText(dept.closed_risks, x + barWidth * 0.85, y - closedHeight - 5);
+                });
+                
+                // Draw legend
+                const legendItems = [
+                    { color: '#007bff', label: 'Total' },
+                    { color: '#dc3545', label: 'Critical' },
+                    { color: '#28a745', label: 'Closed' }
+                ];
+                legendItems.forEach((item, index) => {
+                    const x = 40 + (index * 60);
+                    ctx.fillStyle = item.color;
+                    ctx.fillRect(x, 10, 15, 10);
+                    ctx.fillStyle = '#495057';
+                    ctx.font = '10px Arial';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(item.label, x + 20, 18);
+                });
+            }
         }
     }
-    
-    function generateReport(format) {
-        const reportType = document.getElementById('reportType').value;
-        const department = document.getElementById('reportDepartment').value;
-        const riskLevel = document.getElementById('reportRiskLevel').value;
-        
-        const params = new URLSearchParams({
-            format: format,
-            type: reportType,
-            department: department,
-            risk_level: riskLevel
+
+// Initialize overview charts on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeOverviewCharts();
+            initializeAnalyticsCharts();
         });
-        
-        window.open(`generate_report.php?${params.toString()}`, '_blank');
-    }
-    
-    function printReport() {
-        window.print();
-    }
-    
-    function viewRiskDetails(riskId) {
-        fetch(`get_risk_details.php?id=${riskId}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                document.getElementById('riskModalContent').innerHTML = data.html;
-                document.getElementById('riskModal').style.display = 'block';
-            } else {
-                alert('Failed to load risk details');
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('Error loading risk details');
-        });
-    }
-    
-    function closeRiskModal() {
-        document.getElementById('riskModal').style.display = 'none';
-    }
-    
-    // Initialize overview charts on page load
-    document.addEventListener('DOMContentLoaded', function() {
-        initializeOverviewCharts();
-    });
-    
-    function filterRisks(department) {
-        const risksTable = document.getElementById('risksTable');
-        const rows = risksTable.getElementsByTagName('tr');
-        
-        for (let i = 1; i < rows.length; i++) {
-            const row = rows[i];
-            const rowDepartment = row.getAttribute('data-department');
-            if (department === 'all' || rowDepartment === department) {
-                row.style.display = '';
-            } else {
-                row.style.display = 'none';
-            }
-        }
-    }
-    
-    function filterByRiskLevel(riskLevel) {
-        const risksTable = document.getElementById('risksTable');
-        const rows = risksTable.getElementsByTagName('tr');
-        
-        for (let i = 1; i < rows.length; i++) {
-            const row = rows[i];
-            const rowRiskLevel = row.getAttribute('data-risk-level');
-            if (riskLevel === 'all' || rowRiskLevel === riskLevel) {
-                row.style.display = '';
-            } else {
-                row.style.display = 'none';
-            }
-        }
-    }
-    
-    function filterByBoardReporting(boardReporting) {
-        const risksTable = document.getElementById('risksTable');
-        const rows = risksTable.getElementsByTagName('tr');
-        
-        for (let i = 1; i < rows.length; i++) {
-            const row = rows[i];
-            const rowBoardReporting = row.getAttribute('data-board');
-            if (boardReporting === 'all' || rowBoardReporting === boardReporting) {
-                row.style.display = '';
-            } else {
-                row.style.display = 'none';
-            }
-        }
-    }
-    
-    function toggleBoardReporting(riskId, isChecked) {
-        fetch('update_board_reporting.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                risk_id: riskId,
-                board_reporting: isChecked ? 'YES' : 'NO'
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                console.log('Board reporting updated successfully');
-            } else {
-                console.error('Failed to update board reporting');
-            }
-        });
-    }
     </script>
 
     <script>
-        // Function to fetch risk matrix data from the server
-        async function fetchRiskMatrixData() {
-            try {
-                const response = await fetch('get_risk_matrix_data.php');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                return data;
-            } catch (error) {
-                console.error('Failed to fetch risk matrix data:', error);
-                return [];
+        let showingAllRisks = false;
+        let allRisksData = <?php echo json_encode($all_risks); ?>;
+        let recentRisksData = <?php echo json_encode($recent_risks); ?>;
+        
+        function toggleViewAll() {
+            const tableBody = document.getElementById('risksTableBody');
+            const tableTitle = document.getElementById('tableTitle');
+            const viewAllBtn = document.getElementById('viewAllBtn');
+            
+            if (!showingAllRisks) {
+                // Show all risks
+                displayRisks(allRisksData);
+                tableTitle.textContent = `All Risks (${allRisksData.length})`;
+                viewAllBtn.textContent = 'Show Recent Only';
+                showingAllRisks = true;
+            } else {
+                // Show recent risks only
+                displayRisks(recentRisksData);
+                tableTitle.textContent = 'Recent Risks (Last 10)';
+                viewAllBtn.textContent = 'View All Risks';
+                showingAllRisks = false;
             }
         }
-
-        // Function to draw the risk matrix chart
-        async function drawRiskMatrixChart() {
-            const canvas = document.getElementById('liveRiskMatrix');
-            if (!canvas) {
-                console.error('Canvas element with id "liveRiskMatrix" not found.');
-                return;
-            }
-
-            const ctx = canvas.getContext('2d');
-            const riskMatrixData = await fetchRiskMatrixData();
-
-            // Basic error handling
-            if (!riskMatrixData || riskMatrixData.length === 0) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.font = '16px Arial';
-                ctx.fillStyle = 'red';
-                ctx.textAlign = 'center';
-                ctx.fillText('No risk data available', canvas.width / 2, canvas.height / 2);
-                return;
-            }
-
-            // Animation setup
-            let animationTime = 0;
-
-            function animate() {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-                // Draw risk data points and lines
-                riskMatrixData.forEach((risk, index) => {
-                    const reportCount = parseInt(risk.report_count);
-                    const color = reportCount > 1 ? '#dc3545' : '#17a2b8'; // Red for similar, blue for single
-                    
-                    // Calculate horizontal line position
-                    const baseY = 80 + (index * 60); // Horizontal bands for each risk
-                    const lineY = baseY + Math.sin(animationTime * 0.02 + index) * 10; // Animated vertical movement
-                    
-                    // Draw horizontal moving line
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = 3;
-                    ctx.beginPath();
-                    
-                    // Create horizontal wave line
-                    for (let x = 0; x < canvas.width; x += 5) {
-                        const waveY = lineY + Math.sin((x + animationTime) * 0.01) * 8;
-                        if (x === 0) {
-                            ctx.moveTo(x, waveY);
-                        } else {
-                            ctx.lineTo(x, waveY);
-                        }
-                    }
-                    ctx.stroke();
-                    
-                    // Draw data point at the end of line
-                    const pointX = canvas.width - 50 + Math.sin(animationTime * 0.03) * 20;
-                    ctx.fillStyle = color;
-                    ctx.beginPath();
-                    ctx.arc(pointX, lineY, reportCount > 1 ? 8 : 6, 0, 2 * Math.PI);
-                    ctx.fill();
-                    
-                    // Add click detection for popup
-                    canvas.addEventListener('click', function(event) {
-                        const rect = canvas.getBoundingClientRect();
-                        const clickX = event.clientX - rect.left;
-                        const clickY = event.clientY - rect.top;
-                        
-                        // Check if click is near the data point
-                        const distance = Math.sqrt(Math.pow(clickX - pointX, 2) + Math.pow(clickY - lineY, 2));
-                        if (distance < 15) {
-                            showRiskPopup(risk, event);
-                        }
-                    });
-                    
-                    // Draw risk ID label
-                    ctx.fillStyle = '#495057';
-                    ctx.font = '12px Arial';
-                    ctx.textAlign = 'left';
-                    ctx.fillText(`ID: ${risk.risk_id_number}`, 10, lineY + 4);
-                });
-
-                animationTime += 0.5;
-                requestAnimationFrame(animate);
-            }
-
-            animate();
-        }
-
-        // Function to display risk details in a popup
-        function showRiskPopup(risk, event) {
-            // Create a popup element
-            const popup = document.createElement('div');
-            popup.style.position = 'absolute';
-            popup.style.left = `${event.clientX + 10}px`;
-            popup.style.top = `${event.clientY + 10}px`;
-            popup.style.background = 'white';
-            popup.style.border = '1px solid #ccc';
-            popup.style.padding = '10px';
-            popup.style.boxShadow = '0 2px 5px rgba(0,0,0,0.3)';
-            popup.style.zIndex = '1000';
-            popup.innerHTML = `
-                <h3>Risk Details</h3>
-                <p>Risk ID: ${risk.risk_id_number}</p>
-                <p>Description: ${risk.risk_description}</p>
-                <p>Report Count: ${risk.report_count}</p>
-            `;
-
-            // Add the popup to the document
-            document.body.appendChild(popup);
-
-            // Remove the popup when clicked
-            popup.addEventListener('click', function() {
-                document.body.removeChild(popup);
+        
+        function displayRisks(risks) {
+            const tableBody = document.getElementById('risksTableBody');
+            tableBody.innerHTML = '';
+            
+            risks.forEach(risk => {
+                const levelColors = {
+                    'Critical': '#dc3545',
+                    'High': '#fd7e14',
+                    'Medium': '#ffc107',
+                    'Low': '#28a745'
+                };
+                const color = levelColors[risk.risk_level] || '#6c757d';
+                
+                const row = document.createElement('tr');
+                row.setAttribute('data-risk-id', risk.id);
+                row.setAttribute('data-department', risk.department);
+                row.setAttribute('data-risk-level', risk.risk_level);
+                row.setAttribute('data-board', risk.to_be_reported_to_board || 'NO');
+                row.setAttribute('data-created', risk.created_at);
+                row.style.borderBottom = '1px solid #e9ecef';
+                
+                row.innerHTML = `
+                    <td style="padding: 1rem; color: #495057; font-weight: 500;">${risk.id}</td>
+                    <td style="padding: 1rem; color: #495057; font-weight: 500;">${risk.risk_name}</td>
+                    <td style="padding: 1rem;">
+                        <span style="padding: 0.25rem 0.75rem; background: ${color}; color: white; border-radius: 20px; font-size: 0.85rem; font-weight: 500;">
+                            ${risk.risk_level}
+                        </span>
+                    </td>
+                    <td style="padding: 1rem;">
+                        <span style="padding: 0.25rem 0.75rem; background: ${risk.status == 'Closed' ? '#28a745' : '#17a2b8'}; color: white; border-radius: 20px; font-size: 0.85rem;">
+                            ${risk.status}
+                        </span>
+                    </td>
+                    <td style="padding: 1rem; color: #495057;">${risk.department}</td>
+                    <td style="padding: 1rem; color: #495057;">${new Date(risk.created_at).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'})}</td>
+                    <td style="padding: 1rem;">
+                        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                            <input type="checkbox" ${(risk.to_be_reported_to_board == 'YES') ? 'checked' : ''} 
+                                   onchange="toggleBoardReporting(${risk.id}, this.checked)"
+                                   style="accent-color: #E60012;">
+                            <span style="font-size: 0.9rem; color: #495057;">Report to Board</span>
+                        </label>
+                    </td>
+                    <!-- Removed the Actions column with View Details and Print buttons from JavaScript function -->
+                `;
+                
+                tableBody.appendChild(row);
             });
         }
-
-        // Call the function to draw the chart when the page loads
-        window.onload = drawRiskMatrixChart;
+        
+        function filterByRiskId(searchValue) {
+            const rows = document.querySelectorAll('#risksTableBody tr');
+            rows.forEach(row => {
+                const riskId = row.getAttribute('data-risk-id');
+                if (searchValue === '' || riskId.includes(searchValue)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+        
+        function filterByDateRange() {
+            const dateFrom = document.getElementById('dateFrom').value;
+            const dateTo = document.getElementById('dateTo').value;
+            const rows = document.querySelectorAll('#risksTableBody tr');
+            
+            rows.forEach(row => {
+                const createdDate = row.getAttribute('data-created');
+                const riskDate = new Date(createdDate);
+                
+                let showRow = true;
+                
+                if (dateFrom && riskDate < new Date(dateFrom)) {
+                    showRow = false;
+                }
+                
+                if (dateTo && riskDate > new Date(dateTo)) {
+                    showRow = false;
+                }
+                
+                row.style.display = showRow ? '' : 'none';
+            });
+        }
+        
+        function clearAllFilters() {
+            document.getElementById('searchRiskId').value = '';
+            document.getElementById('departmentFilter').value = 'all';
+            document.getElementById('riskLevelFilter').value = 'all';
+            document.getElementById('boardFilter').value = 'all';
+            document.getElementById('dateFrom').value = '';
+            document.getElementById('dateTo').value = '';
+            
+            const rows = document.querySelectorAll('#risksTableBody tr');
+            rows.forEach(row => {
+                row.style.display = '';
+            });
+        }
+        
+        function exportFilteredRisks(format) {
+            const visibleRows = Array.from(document.querySelectorAll('#risksTableBody tr')).filter(row => 
+                row.style.display !== 'none'
+            );
+            
+            if (visibleRows.length === 0) {
+                alert('No risks to export. Please adjust your filters.');
+                return;
+            }
+            
+            // Collect data from visible rows
+            const exportData = [];
+            visibleRows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 7) {
+                    exportData.push({
+                        riskId: cells[0].textContent.trim(),
+                        riskName: cells[1].textContent.trim(),
+                        riskLevel: cells[2].textContent.trim(),
+                        status: cells[3].textContent.trim(),
+                        department: cells[4].textContent.trim(),
+                        dateCreated: cells[5].textContent.trim(),
+                        boardReport: cells[6].querySelector('input[type="checkbox"]')?.checked ? 'YES' : 'NO'
+                    });
+                }
+            });
+            
+            if (format === 'excel') {
+                exportToExcel(exportData);
+            } else if (format === 'pdf') {
+                exportToPDF(exportData);
+            }
+        }
+        
+        function exportToExcel(data) {
+            let csvContent = "Risk ID,Risk Name,Risk Level,Status,Department,Date Created,Board Report\n";
+            
+            data.forEach(row => {
+                csvContent += `"${row.riskId}","${row.riskName}","${row.riskLevel}","${row.status}","${row.department}","${row.dateCreated}","${row.boardReport}"\n`;
+            });
+            
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', `risk_export_${new Date().toISOString().split('T')[0]}.csv`);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+        
+        function exportToPDF(data) {
+            const printWindow = window.open('', '_blank');
+            let tableRows = '';
+            
+            data.forEach(row => {
+                tableRows += `
+                    <tr>
+                        <td>${row.riskId}</td>
+                        <td>${row.riskName}</td>
+                        <td>${row.riskLevel}</td>
+                        <td>${row.status}</td>
+                        <td>${row.department}</td>
+                        <td>${row.dateCreated}</td>
+                        <td>${row.boardReport}</td>
+                    </tr>
+                `;
+            });
+            
+            printWindow.document.write(`
+                <html>
+                <head>
+                    <title>Risk Export Report</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; margin: 20px; }
+                        .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #E60012; padding-bottom: 10px; }
+                        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+                        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 12px; }
+                        th { background-color: #495057; color: white; font-weight: bold; }
+                        tr:nth-child(even) { background-color: #f8f9fa; }
+                        .footer { margin-top: 30px; text-align: center; font-size: 10px; color: #666; }
+                    </style>
+                </head>
+                <body>
+                    <div class="header">
+                        <h1>Airtel Risk Management System</h1>
+                        <h2>Risk Export Report</h2>
+                        <p>Generated on: ${new Date().toLocaleDateString()} | Total Risks: ${data.length}</p>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Risk ID</th>
+                                <th>Risk Name</th>
+                                <th>Risk Level</th>
+                                <th>Status</th>
+                                <th>Department</th>
+                                <th>Date Created</th>
+                                <th>Board Report</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${tableRows}
+                        </tbody>
+                    </table>
+                    <div class="footer">
+                        <p>This report contains ${data.length} risk records exported from the Airtel Risk Management System.</p>
+                    </div>
+                </body>
+                </html>
+            `);
+            printWindow.document.close();
+            printWindow.print();
+        }
+        
+        function viewFullRiskDetails(riskId) {
+            fetch(`get_full_risk_details.php?id=${riskId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById('riskDetailsContent').innerHTML = data.html;
+                    document.getElementById('riskDetailsModal').style.display = 'block';
+                } else {
+                    alert('Failed to load risk details: ' + (data.message || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error loading risk details');
+            });
+        }
+        
+        function closeRiskDetailsModal() {
+            document.getElementById('riskDetailsModal').style.display = 'none';
+        }
+        
+        function printRiskDetails() {
+            const printContent = document.getElementById('riskDetailsContent').innerHTML;
+            const printWindow = window.open('', '_blank');
+            printWindow.document.write(`
+                <html>
+                <head>
+                    <title>Risk Details</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; margin: 20px; }
+                        .print-header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #E60012; padding-bottom: 10px; }
+                        .detail-section { margin-bottom: 20px; }
+                        .detail-label { font-weight: bold; color: #495057; }
+                        .detail-value { margin-left: 10px; }
+                        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+                        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                        th { background-color: #f8f9fa; }
+                    </style>
+                </head>
+                <body>
+                    <div class="print-header">
+                        <h1>Airtel Risk Management System</h1>
+                        <h2>Risk Details Report</h2>
+                        <p>Generated on: ${new Date().toLocaleDateString()}</p>
+                    </div>
+                    ${printContent}
+                </body>
+                </html>
+            `);
+            printWindow.document.close();
+            printWindow.print();
+        }
+        
+        function printSingleRisk(riskId) {
+            window.open(`print_risk.php?id=${riskId}`, '_blank');
+        }
+        
+        function printRisksTable() {
+            window.print();
+        }
+        
+        // Initialize overview charts on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeOverviewCharts();
+            initializeAnalyticsCharts();
+        });
     </script>
 </body>
 </html>

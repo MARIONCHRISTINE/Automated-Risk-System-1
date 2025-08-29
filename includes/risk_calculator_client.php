@@ -59,9 +59,9 @@ class RiskCalculatorClient {
         $rating = (int)$likelihood * (int)$consequence;
         
         $level = 'Low';
-        if ($rating >= 15) $level = 'Critical';
-        elseif ($rating >= 9) $level = 'High';
-        elseif ($rating >= 4) $level = 'Medium';
+        if ($rating >= 12) $level = 'Critical';      // 4x3 or 3x4 combinations
+        elseif ($rating >= 8) $level = 'High';       // 4x2, 2x4 combinations  
+        elseif ($rating >= 4) $level = 'Medium';     // 4x1, 2x2, 1x4 combinations
         
         return [
             'rating' => $rating,

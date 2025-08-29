@@ -23,11 +23,17 @@ if (isset($_POST['submit_risk'])) {
     $risk_categories_json = json_encode($risk_categories);
     $category_details_json = json_encode($category_details);
     
+    $involves_money_loss = isset($_POST['involves_money_loss']) ? $_POST['involves_money_loss'] == 'Yes' ? 1 : 0 : 0;
+    $money_amount = isset($_POST['money_amount']) ? $_POST['money_amount'] : '0.00';
+    $risk_description = $_POST['risk_description'];
+    $cause_of_risk = $_POST['cause_of_risk'];
+    $user_id = $_SESSION['user_id'];
+    
     $user = getCurrentUser();
     if (empty($user['department']) || $user['department'] === null) {
         $dept_query = "SELECT department FROM users WHERE id = :user_id";
         $dept_stmt = $db->prepare($dept_query);
-        $dept_stmt->bindParam(':user_id', $_SESSION['user_id']);
+        $dept_stmt->bindParam(':user_id', $user_id);
         $dept_stmt->execute();
         $dept_result = $dept_stmt->fetch(PDO::FETCH_ASSOC);
         if ($dept_result && !empty($dept_result['department'])) {
@@ -70,43 +76,120 @@ if (isset($_POST['submit_risk'])) {
         $error_message = "User account not found. Please contact administrator.";
     } else {
         try {
+            $db->beginTransaction();
+            
             $query = "INSERT INTO risk_incidents (
+                        risk_name,
                         risk_categories, 
                         category_details, 
                         risk_description, 
                         cause_of_risk, 
                         department, 
-                        reported_by, 
-                        document_path, 
+                        reported_by,
+                        risk_owner_id,
+                        inherent_likelihood,
+                        inherent_consequence,
+                        risk_rating,
+                        involves_money_loss,
+                        money_amount,
+                        existing_or_new,
+                        treatment_status,
+                        risk_status,
                         created_at, 
-                        updated_at,
-                        status,
-                        risk_status
+                        updated_at
                       ) VALUES (
+                        :risk_name,
                         :risk_categories, 
                         :category_details, 
                         :risk_description, 
                         :cause_of_risk, 
                         :department, 
-                        :reported_by, 
-                        :document_path, 
+                        :reported_by,
+                        :risk_owner_id,
+                        1,
+                        1,
+                        1,
+                        :involves_money_loss,
+                        :money_amount,
+                        'New',
+                        'Not Started',
+                        'pending',
                         NOW(), 
-                        NOW(),
-                        'open',
-                        'Not Started'
+                        NOW()
                       )";
-            
+
             $stmt = $db->prepare($query);
+            
+            $risk_name = $risk_description . '...'; // Generate risk name from description
+            $risk_categories_json = json_encode($risk_categories);
+            $category_details_json = json_encode($category_details);
+            $user_id = $_SESSION['user_id'];
+            $department_val = $department;
+            $involves_money = isset($_POST['involves_money_loss']) ? $_POST['involves_money_loss'] == 'Yes' ? 1 : 0 : 0;
+            $money_amount_val = isset($_POST['money_amount']) ? $_POST['money_amount'] : '0.00';
+            
+            $stmt->bindParam(':risk_name', $risk_name);
             $stmt->bindParam(':risk_categories', $risk_categories_json);
             $stmt->bindParam(':category_details', $category_details_json);
-            $stmt->bindParam(':risk_description', $_POST['risk_description']);
-            $stmt->bindParam(':cause_of_risk', $_POST['cause_of_risk']);
-            $stmt->bindParam(':department', $department);
-            $stmt->bindParam(':reported_by', $_SESSION['user_id']);
-            $stmt->bindParam(':document_path', $uploaded_file_path);
+            $stmt->bindParam(':risk_description', $risk_description);
+            $stmt->bindParam(':cause_of_risk', $cause_of_risk);
+            $stmt->bindParam(':department', $department_val);
+            $stmt->bindParam(':reported_by', $user_id);
+            $stmt->bindParam(':risk_owner_id', $user_id);
+            $stmt->bindParam(':involves_money_loss', $involves_money);
+            $stmt->bindParam(':money_amount', $money_amount_val);
 
             if ($stmt->execute()) {
                 $risk_id = $db->lastInsertId();
+                
+                if ($uploaded_file_path) {
+                    $doc_query = "INSERT INTO risk_documents (
+                                    risk_id, 
+                                    section_type, 
+                                    original_filename, 
+                                    stored_filename, 
+                                    file_path, 
+                                    file_size,
+                                    document_content,
+                                    mime_type, 
+                                    uploaded_by, 
+                                    uploaded_at
+                                  ) VALUES (
+                                    :risk_id, 
+                                    'risk_identification', 
+                                    :original_filename, 
+                                    :stored_filename, 
+                                    :file_path, 
+                                    :file_size,
+                                    :document_content,
+                                    :mime_type, 
+                                    :uploaded_by, 
+                                    NOW()
+                                  )";
+
+                    $doc_stmt = $db->prepare($doc_query);
+                    $original_filename = $_FILES['risk_document']['name'];
+                    $stored_filename = basename($uploaded_file_path);
+                    $file_size = $_FILES['risk_document']['size'];
+
+                    $file_content = file_get_contents($uploaded_file_path);
+                    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                    $mime_type = finfo_file($finfo, $uploaded_file_path);
+                    finfo_close($finfo);
+
+                    $doc_stmt->bindParam(':risk_id', $risk_id);
+                    $doc_stmt->bindParam(':original_filename', $original_filename);
+                    $doc_stmt->bindParam(':stored_filename', $stored_filename);
+                    $doc_stmt->bindParam(':file_path', $uploaded_file_path);
+                    $doc_stmt->bindParam(':file_size', $file_size);
+                    $doc_stmt->bindParam(':document_content', $file_content, PDO::PARAM_LOB);
+                    $doc_stmt->bindParam(':mime_type', $mime_type);
+                    $doc_stmt->bindParam(':uploaded_by', $user_id);
+
+                    $doc_stmt->execute();
+                }
+                
+                $db->commit();
                 
                 // Call auto-assignment function
                 $assignment_result = assignRiskAutomatically($risk_id, $_SESSION['user_id'], $db);
@@ -119,9 +202,11 @@ if (isset($_POST['submit_risk'])) {
                     exit();
                 }
             } else {
+                $db->rollback();
                 $error_message = "Failed to report risk. Please try again.";
             }
         } catch (PDOException $e) {
+            $db->rollback();
             $error_message = "Database error: " . $e->getMessage();
             error_log("Risk submission error: " . $e->getMessage());
         }
@@ -146,8 +231,14 @@ if (isset($_GET['success'])) {
     }
 }
 
-// Get user's reported risks
-$query = "SELECT * FROM risk_incidents WHERE reported_by = :user_id ORDER BY created_at DESC";
+$query = "SELECT r.*, 
+                 (SELECT COUNT(*) FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification') as has_document,
+                 (SELECT rd.file_path FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification' LIMIT 1) as document_path,
+                 (SELECT rd.original_filename FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification' LIMIT 1) as document_filename
+          FROM risk_incidents r 
+          WHERE r.reported_by = :user_id 
+          ORDER BY r.created_at DESC";
+
 $stmt = $db->prepare($query);
 $stmt->bindParam(':user_id', $_SESSION['user_id']);
 $stmt->execute();
@@ -665,6 +756,153 @@ if (empty($user['department']) || $user['department'] === null) {
             border-color: #28a745;
             color: #155724;
         }
+
+        /* Fixed Risk Categories Styling */
+        .risk-categories-container {
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            padding: 20px;
+            border-radius: 8px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .category-item {
+            margin-bottom: 15px;
+        }
+
+        .category-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 16px;
+            margin: 0;
+            padding: 15px 20px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #E60012, #B8000E);
+            color: white;
+            transition: all 0.3s ease;
+            width: 100%;
+            box-shadow: 0 2px 4px rgba(230, 0, 18, 0.2);
+        }
+
+        .checkbox-label:hover {
+            background: linear-gradient(135deg, #B8000E, #A50010);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(230, 0, 18, 0.3);
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            margin-right: 15px;
+            width: 18px;
+            height: 18px;
+            accent-color: white;
+            cursor: pointer;
+        }
+
+        /* Document Link Styles */
+        .document-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: #E60012;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: background 0.3s;
+            margin-top: 0.5rem;
+        }
+
+        .document-link:hover {
+            background: #B8000E;
+            color: white;
+            text-decoration: none;
+        }
+
+        /* Radio Button Styles */
+        .radio-group {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 15px;
+        }
+
+        .radio-option {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            padding: 12px 20px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            background: white;
+            transition: all 0.3s ease;
+            min-width: 120px;
+            font-weight: 500;
+        }
+
+        .radio-option:hover {
+            border-color: #E60012;
+            background: rgba(230, 0, 18, 0.05);
+        }
+
+        .radio-option input[type="radio"] {
+            display: none;
+        }
+
+        .radio-custom {
+            width: 20px;
+            height: 20px;
+            border: 2px solid #ddd;
+            border-radius: 50%;
+            margin-right: 12px;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+
+        .radio-option input[type="radio"]:checked + .radio-custom {
+            border-color: #E60012;
+            background: #E60012;
+        }
+
+        .radio-option input[type="radio"]:checked + .radio-custom::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 8px;
+            height: 8px;
+            background: white;
+            border-radius: 50%;
+        }
+
+        .radio-option input[type="radio"]:checked ~ .radio-text {
+            color: #E60012;
+            font-weight: 600;
+        }
+
+        .radio-text {
+            font-size: 1rem;
+            color: #333;
+            transition: color 0.3s ease;
+        }
+
+        /* Modal Info Display */
+        .modal-info-display {
+            background: #f8f9fa;
+            padding: 1rem;
+            border-radius: 4px;
+            border-left: 3px solid #E60012;
+            margin-bottom: 1rem;
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
             body {
@@ -731,191 +969,6 @@ if (empty($user['department']) || $user['department'] === null) {
             }
             .modal-body {
                 padding: 1.5rem;
-            }
-        }
-        /* Added styles for risk categories */
-        /* Updated CSS to match report_risk.php exactly */
-        /* Completely replacing CSS to match report_risk.php beautiful design */
-        .risk-categories-container {
-            background: #f8f9fa;
-            border: 1px solid #ddd;
-            padding: 15px;
-            border-radius: 5px;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-
-        .category-item {
-            margin-bottom: 20px;
-            padding: 15px;
-            border: 2px solid #e3f2fd;
-            border-radius: 8px;
-            background: #fafafa;
-        }
-
-        .category-item:last-child {
-            border-bottom: 2px solid #e3f2fd;
-        }
-
-        /* Enhanced category name styling with color distinction */
-        .checkbox-label {
-            display: flex;
-            align-items: center;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 16px;
-            margin-bottom: 0;
-            padding: 12px;
-            border-radius: 6px;
-            background: linear-gradient(135deg,rgb(231, 9, 28),rgb(235, 152, 159));
-            color: white;
-            transition: all 0.3s ease;
-        }
-
-        .checkbox-label:hover {
-            background: linear-gradient(135deg,rgb(248, 4, 4),rgb(241, 2, 2));
-            transform: translateY(-1px);
-        }
-
-        .checkbox-label input[type="checkbox"] {
-            margin-right: 12px;
-            transform: scale(1.4);
-            accent-color: white;
-        }
-
-        /* 2x2 grid layout for impact levels */
-        .impact-levels {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            grid-template-rows: 1fr 1fr;
-            gap: 12px;
-            margin-top: 15px;
-            padding: 10px;
-        }
-
-        /* Square-styled radio buttons with distinct colors */
-        .radio-label {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 15px;
-            border: 2px solid #4caf50;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            background: linear-gradient(135deg, #e8f5e8, #f1f8e9);
-            min-height: 80px;
-            text-align: center;
-            font-size: 13px;
-            line-height: 1.3;
-        }
-
-        .radio-label:hover {
-            background: linear-gradient(135deg, #c8e6c9, #dcedc8);
-            border-color: #388e3c;
-            transform: scale(1.02);
-            box-shadow: 0 4px 8px rgba(76, 175, 80, 0.3);
-        }
-
-        .radio-label input[type="radio"] {
-            margin-right: 8px;
-            transform: scale(1.3);
-            accent-color: #4caf50;
-        }
-
-        .radio-label input[type="radio"]:checked + span {
-            font-weight: 600;
-            color: #2e7d32;
-        }
-
-        /* Responsive design for smaller screens */
-        @media (max-width: 768px) {
-            .impact-levels {
-                grid-template-columns: 1fr;
-                grid-template-rows: repeat(4, 1fr);
-            }
-        }
-        
-        .risk-matrix {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 1rem;
-            margin: 1rem 0;
-        }
-        
-        .matrix-section {
-            border: 1px solid #dee2e6;
-            border-radius: 0.25rem;
-            padding: 1rem;
-            background: #f8f9fa;
-        }
-        
-        .matrix-title {
-            font-weight: 600;
-            margin-bottom: 1rem;
-            color: #E60012;
-            text-align: center;
-        }
-        
-        .rating-display {
-            text-align: center;
-            padding: 0.5rem;
-            margin-top: 0.5rem;
-            border-radius: 0.25rem;
-            font-weight: bold;
-        }
-        
-        .rating-low { background: #d4edda; color: #155724; }
-        .rating-medium { background: #fff3cd; color: #856404; }
-        .rating-high { background: #f8d7da; color: #721c24; }
-        .rating-critical { background: #721c24; color: white; }
-        
-        .btn {
-            background: #E60012;
-            color: white;
-            border: none;
-            padding: 0.75rem 1.5rem;
-            border-radius: 5px;
-            cursor: pointer;
-            transition: all 0.3s;
-            font-size: 1rem;
-            font-weight: 500;
-            text-decoration: none;
-            display: inline-block;
-        }
-        
-        .btn:hover {
-            background: #B8000E;
-            transform: translateY(-1px);
-            box-shadow: 0 4px 12px rgba(230, 0, 18, 0.3);
-        }
-        
-        .alert {
-            padding: 1rem;
-            border-radius: 5px;
-            margin-bottom: 1rem;
-            font-weight: 500;
-        }
-        
-        .alert-success {
-            background: #d4edda;
-            color: #155724;
-            border-left: 4px solid #28a745;
-        }
-        
-        .alert-danger {
-            background: #f8d7da;
-            color: #721c24;
-            border-left: 4px solid #dc3545;
-        }
-        
-        @media (max-width: 768px) {
-            .form-row {
-                grid-template-columns: 1fr;
-            }
-            
-            .risk-matrix {
-                grid-template-columns: 1fr;
             }
         }
     </style>
@@ -993,8 +1046,17 @@ if (empty($user['department']) || $user['department'] === null) {
                         <?php foreach (array_slice($user_risks, 0, 10) as $risk): ?>
     <div class="risk-item">
         <div class="risk-header">
-            <!-- Display risk categories instead of risk_name -->
-            <div class="risk-name"><?php echo htmlspecialchars($risk['risk_categories']); ?></div>
+            <!-- Display risk categories without quotes/brackets -->
+            <div class="risk-name">
+                <?php 
+                $categories = json_decode($risk['risk_categories'], true);
+                if (is_array($categories)) {
+                    echo htmlspecialchars(implode(', ', $categories));
+                } else {
+                    echo htmlspecialchars($risk['risk_categories']);
+                }
+                ?>
+            </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
                 <?php if ($risk['risk_owner_id']): ?>
                     <span style="background: #d4edda; color: #155724; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">
@@ -1005,7 +1067,7 @@ if (empty($user['department']) || $user['department'] === null) {
                         🔄 Assigning...
                     </span>
                 <?php endif; ?>
-                <button class="view-btn" onclick="viewRisk(<?php echo $risk['id']; ?>, '<?php echo htmlspecialchars($risk['risk_categories']); ?>', '<?php echo htmlspecialchars($risk['risk_description']); ?>', '<?php echo htmlspecialchars($risk['cause_of_risk']); ?>', '<?php echo $risk['created_at']; ?>', <?php echo $risk['risk_owner_id'] ? 'true' : 'false'; ?>)">
+                <button class="view-btn" onclick="viewRisk(<?php echo $risk['id']; ?>, '<?php echo htmlspecialchars($risk['risk_categories']); ?>', '<?php echo htmlspecialchars($risk['risk_description']); ?>', '<?php echo htmlspecialchars($risk['cause_of_risk']); ?>', '<?php echo $risk['created_at']; ?>', <?php echo $risk['risk_owner_id'] ? 'true' : 'false'; ?>, '<?php echo htmlspecialchars($risk['document_path'] ?? ''); ?>', '<?php echo htmlspecialchars($risk['document_filename'] ?? ''); ?>')">>
                     View
                 </button>
             </div>
@@ -1037,314 +1099,95 @@ if (empty($user['department']) || $user['department'] === null) {
                 <button class="close" onclick="closeReportModal()">&times;</button>
             </div>
             <div class="modal-body">
-                <!-- Removed staff risk reporting process explanation -->
                 
                 <form id="riskForm" method="POST" enctype="multipart/form-data" style="background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                    <!-- Simplified form - only 4 fields for staff -->
+                    <h3 style="color: #E60012; margin-bottom: 1rem; border-bottom: 2px solid #E60012; padding-bottom: 0.5rem;">
+                        Risk Identification Form (Staff View)
+                    </h3>
+                    
+                    <!-- Fixed risk categories with better alignment -->
                     <div class="form-group">
-                        <!-- Completely replaced risk categories structure to match report_risk.php -->
-                        
-                        <!-- Updated risk categories to match the detailed structure from new attachment -->
-                        <label class="form-label">Risk Categories * <small>(Select all that apply)</small></label>
+                        <label class="form-label"><strong>1. Risk Categories</strong> <span style="color: red;">*</span> <small>(Select all that apply)</small></label>
                         <div class="risk-categories-container">
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Financial Exposure" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Financial Exposure [Revenue, Operating Expenditure, Book value]</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Financial Exposure">
+                                    Financial Exposure
                                 </label>
-                                <div class="category-input" id="input_financial_exposure" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_financial_exposure" value=">5%">
-                                            <span>>5%</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_financial_exposure" value="1%-5%">
-                                            <span>1%-5%</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_financial_exposure" value="0.25%-1%">
-                                            <span>0.25%-1%</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_financial_exposure" value="<0.25%">
-                                            <span>&lt;0.25%</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Decrease in market share" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Decrease in market share</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Decrease in market share">
+                                    Decrease in market share
                                 </label>
-                                <div class="category-input" id="input_decrease_in_market_share" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_decrease_in_market_share" value=">2%">
-                                            <span>>2%</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_decrease_in_market_share" value=">1% but <2%">
-                                            <span>>1% but &lt;2%</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_decrease_in_market_share" value=">0.50% but <1%">
-                                            <span>>0.50% but &lt;1%</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_decrease_in_market_share" value="<0.50%">
-                                            <span>&lt;0.50%</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Customer Experience" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Customer Experience</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Customer Experience">
+                                    Customer Experience
                                 </label>
-                                <div class="category-input" id="input_customer_experience" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_customer_experience" value="Compliance Regulations Breaches Penalties >$1M">
-                                            <span>Compliance Regulations Breaches<br>Penalties >$1M</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_customer_experience" value="Compliance Sanctions Limited impact Penalties $0.5M-$1M">
-                                            <span>Compliance Sanctions<br>Limited impact<br>Penalties $0.5M-$1M</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_customer_experience" value="Compliance Sanctions Isolated impact Penalties $0.5M-$1M">
-                                            <span>Compliance Sanctions<br>Isolated impact<br>Penalties $0.5M-$1M</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_customer_experience" value="Compliance Sanctions No impact Penalties <$0.5M">
-                                            <span>Compliance Sanctions<br>No impact<br>Penalties &lt;$0.5M</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Compliance" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Compliance</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Compliance">
+                                    Compliance
                                 </label>
-                                <div class="category-input" id="input_compliance" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_compliance" value="Sanctions Directors Compliance Regulations Breaches Penalties >$1M">
-                                            <span>Sanctions Directors<br>Compliance Regulations<br>Breaches Penalties >$1M</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_compliance" value="Compliance Sanctions Limited impact Penalties $0.5M-$1M">
-                                            <span>Compliance Sanctions<br>Limited impact<br>Penalties $0.5M-$1M</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_compliance" value="Compliance Sanctions Isolated impact Penalties $0.5M-$1M">
-                                            <span>Compliance Sanctions<br>Isolated impact<br>Penalties $0.5M-$1M</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_compliance" value="Compliance Sanctions No impact Penalties <$0.5M">
-                                            <span>Compliance Sanctions<br>No impact<br>Penalties &lt;$0.5M</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Reputation" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Reputation</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Reputation">
+                                    Reputation
                                 </label>
-                                <div class="category-input" id="input_reputation" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_reputation" value="National media coverage">
-                                            <span>National media coverage</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_reputation" value="Limited media coverage">
-                                            <span>Limited media coverage</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_reputation" value="Local media coverage">
-                                            <span>Local media coverage</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_reputation" value="No impact Limited media coverage">
-                                            <span>No impact Limited media coverage</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Fraud" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Fraud</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Fraud">
+                                    Fraud
                                 </label>
-                                <div class="category-input" id="input_fraud" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_fraud" value=">$1M">
-                                            <span>>$1M</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_fraud" value="Code of Conduct Violations">
-                                            <span>Code of Conduct Violations</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_fraud" value="Isolated impact">
-                                            <span>Isolated impact</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_fraud" value="No impact Limited media coverage">
-                                            <span>No impact Limited media coverage</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Operations" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Operations (Business continuity)</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Operations">
+                                    Operations
                                 </label>
-                                <div class="category-input" id="input_operations" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_operations" value="1. Substantial loss of service or business capability 2. Complete operational shutdown at Data centres, warehouses for >3 days 3. Complete loss of data stored in systems or IT downtime >3 days">
-                                            <span>1. Substantial loss of service or business capability<br>2. Complete operational shutdown at Data centres, warehouses for >3 days<br>3. Complete loss of data stored in systems or IT downtime >3 days</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_operations" value="1. Major reduction in service or business capability 2. Major operational disruption at data centers, warehouses for 2 - 3 days 3. System data storage and archival impacted or IT downtime from 1-3 days">
-                                            <span>1. Major reduction in service or business capability<br>2. Major operational disruption at data centers, warehouses for 2 - 3 days<br>3. System data storage and archival impacted or IT downtime from 1-3 days</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_operations" value="1. Temporary but recoverable loss of service or business capability. May be limited to particular region/part of the country 2. Brief operational disruption 3. IT system downtime <=1 day, data loss averted due to timely data retrieval">
-                                            <span>1. Temporary but recoverable loss of service or business capability. May be limited to particular region/part of the country<br>2. Brief operational disruption<br>3. IT system downtime <=1 day, data loss averted due to timely data retrieval</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_operations" value="1. Limited operation disruption, resolved immediately 2. Limited impact on achievement of business objectives">
-                                            <span>1. Limited operation disruption, resolved immediately<br>2. Limited impact on achievement of business objectives</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Networks" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Networks</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Networks">
+                                    Networks
                                 </label>
-                                <div class="category-input" id="input_networks" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_networks" value="1. Network availability >95% but <99% 2. Frustration Index (for voice, data services) throughout 3. Liability, 3-4 seconds the threshold by 1-5">
-                                            <span>1. Network availability >95% but &lt;99% 2. Frustration Index (for voice, data services) throughout 3. Liability, 3-4 seconds the threshold by 1-5</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_networks" value="1. Network availability >90% but <95% 2. Frustration Index (for voice, data services) throughout 3. Liability, 3-4 seconds the threshold by 4-5">
-                                            <span>1. Network availability >90% but &lt;95% 2. Frustration Index (for voice, data services) throughout 3. Liability, 3-4 seconds the threshold by 4-5</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_networks" value="1. Network availability >85% but <90% 2. Frustration Index (for voice, data services) throughout 3. Liability, 3-4 seconds the threshold by 4-5">
-                                            <span>1. Network availability >85% but &lt;90% 2. Frustration Index (for voice, data services) throughout 3. Liability, 3-4 seconds the threshold by 4-5</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_networks" value="1. Network availability <85% 2. Frustration Index (for voice, data services) throughout 3. Liability, 3-4 seconds the threshold by 4-5">
-                                            <span>1. Network availability &lt;85% 2. Frustration Index (for voice, data services) throughout 3. Liability, 3-4 seconds the threshold by 4-5</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="People" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">People</span>
+                                    <input type="checkbox" name="risk_categories[]" value="People">
+                                    People
                                 </label>
-                                <div class="category-input" id="input_people" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_people" value="1. Total employee turnover >15% 2. Succession planning for ECs critical positions <40% 3. 1 fatality injured or 2-5 Accidents">
-                                            <span>1. Total employee turnover >15% 2. Succession planning for ECs critical positions &lt;40% 3. 1 fatality injured or 2-5 Accidents</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_people" value="1. Total employee turnover 5-15% 2. Succession planning for ECs critical positions <40% 3. Heavily injured or 2-5 Accidents">
-                                            <span>1. Total employee turnover 5-15% 2. Succession planning for ECs critical positions &lt;40% 3. Heavily injured or 2-5 Accidents</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_people" value="1. Total employee turnover <5% 2. Succession planning for ECs critical positions <40% 3. Heavily injured or 2-5 Accidents">
-                                            <span>1. Total employee turnover &lt;5% 2. Succession planning for ECs critical positions &lt;40% 3. Heavily injured or 2-5 Accidents</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_people" value="1. Total employee turnover <5% 2. Succession planning for ECs critical positions >40% 3. Heavily injured or 2-5 Accidents">
-                                            <span>1. Total employee turnover &lt;5% 2. Succession planning for ECs critical positions >40% 3. Heavily injured or 2-5 Accidents</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="IT" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">IT (Cybersecurity & Data Privacy)</span>
+                                    <input type="checkbox" name="risk_categories[]" value="IT">
+                                    IT
                                 </label>
-                                <div class="category-input" id="input_it" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_it" value="Breach of cyber security attempted and prevented Breach of other privacy attempted and prevented Information may be generated from existing">
-                                            <span>Breach of cyber security attempted and prevented Breach of other privacy attempted and prevented Information may be generated from existing</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_it" value="Breach of other privacy attempted and prevented Information may be generated from existing Breach of customer reported">
-                                            <span>Breach of other privacy attempted and prevented Information may be generated from existing Breach of customer reported</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_it" value="Information may be generated from existing Breach of customer reported">
-                                            <span>Information may be generated from existing Breach of customer reported</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_desc_it" value="Breach of customer reported">
-                                            <span>Breach of customer reported</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                             
                             <div class="category-item">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Other" onchange="toggleCategoryInput(this)">
-                                    <span class="checkmark">Other</span>
+                                    <input type="checkbox" name="risk_categories[]" value="Other">
+                                    Other
                                 </label>
-                                <div class="category-input" id="input_other" style="display: none;">
-                                    <div class="impact-levels">
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_other" value="High Impact">
-                                            <span>High Impact</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_other" value="Medium Impact">
-                                            <span>Medium Impact</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_other" value="Low Impact">
-                                            <span>Low Impact</span>
-                                        </label>
-                                        <label class="radio-label">
-                                            <input type="radio" name="category_value_other" value="Minimal Impact">
-                                            <span>Minimal Impact</span>
-                                        </label>
-                                    </div>
-                                </div>
                             </div>
                         </div>
-
+                    </div>
+                    
                     <div class="form-group">
                         <label for="risk_description"><strong>2. Risk Description</strong> <span style="color: red;">*</span></label>
                         <textarea id="risk_description" name="risk_description" required placeholder="Describe the risk in detail - what exactly is the problem or potential issue?"></textarea>
@@ -1355,8 +1198,30 @@ if (empty($user['department']) || $user['department'] === null) {
                         <textarea id="cause_of_risk" name="cause_of_risk" required placeholder="What causes this risk? What are the root causes or contributing factors?"></textarea>
                     </div>
                     
+                    <!-- Money loss field with improved styling -->
                     <div class="form-group">
-                        <label for="risk_document"><strong>4. Supporting Document</strong> (Optional)</label>
+                        <label class="form-label"><strong>4. Does your risk involves loss of money?</strong> <span style="color: red;">*</span></label>
+                        <div class="radio-group">
+                            <label class="radio-option">
+                                <input type="radio" name="involves_money_loss" value="Yes" onchange="toggleMoneyAmount()" required>
+                                <span class="radio-custom"></span>
+                                <span class="radio-text">Yes</span>
+                            </label>
+                            <label class="radio-option">
+                                <input type="radio" name="involves_money_loss" value="No" onchange="toggleMoneyAmount()" required>
+                                <span class="radio-custom"></span>
+                                <span class="radio-text">No</span>
+                            </label>
+                        </div>
+                        <div id="money_amount_field" style="display: none; margin-top: 15px;">
+                            <label for="money_amount"><strong>Amount</strong></label>
+                            <input type="number" id="money_amount" name="money_amount" placeholder="Enter amount in your local currency" style="width: 100%; padding: 12px; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem; margin-top: 8px;">
+                        </div>
+                    </div>
+
+                    
+                    <div class="form-group">
+                        <label for="risk_document"><strong>5. Supporting Document</strong> (Optional)</label>
                         <div class="file-upload-area" id="fileUploadArea" onclick="document.getElementById('risk_document').click()">
                             <div class="file-upload-icon">📄</div>
                             <div class="file-upload-text">Click to upload a document</div>
@@ -1365,10 +1230,8 @@ if (empty($user['department']) || $user['department'] === null) {
                         <input type="file" id="risk_document" name="risk_document" class="file-input" accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png" onchange="handleFileSelect(this)">
                     </div>
                     
-                    <!-- Removed "what happens next" explanation -->
-                    
-                    <button type="submit" name="submit_risk" style="background:rgb(245, 6, 6); color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; width: 100%;">
-                        Submit Risk Report
+                    <button type="submit" name="submit_risk" style="background: #E60012; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; width: 100%;">
+                        Submit Risk Identification
                     </button>
                 </form>
             </div>
@@ -1383,25 +1246,36 @@ if (empty($user['department']) || $user['department'] === null) {
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <!-- Changed label from "Risk Name" to "Risk Category" -->
-                    <label>Risk Category:</label>
-                    <div style="background: #f8f9fa; padding: 1rem; border-radius: 4px; border-left: 3px solid #E60012;" id="modalRiskCategory"></div>
+                    <label>Risk Categories:</label>
+                    <div class="modal-info-display" id="modalRiskCategory"></div>
                 </div>
                 <div class="form-group">
                     <label>Risk Description:</label>
-                    <div style="background: #f8f9fa; padding: 1rem; border-radius: 4px; border-left: 3px solid #E60012;" id="modalRiskDescription"></div>
+                    <div class="modal-info-display" id="modalRiskDescription"></div>
                 </div>
                 <div class="form-group">
                     <label>Cause of Risk:</label>
-                    <div style="background: #f8f9fa; padding: 1rem; border-radius: 4px; border-left: 3px solid #E60012;" id="modalCauseOfRisk"></div>
+                    <div class="modal-info-display" id="modalCauseOfRisk"></div>
                 </div>
                 <div class="form-group">
                     <label>Date Submitted:</label>
-                    <div style="background: #f8f9fa; padding: 1rem; border-radius: 4px; border-left: 3px solid #E60012;" id="modalDateSubmitted"></div>
-                </div><div class="form-group">
-    <label>Assignment Status:</label>
-    <div style="background: #f8f9fa; padding: 1rem; border-radius: 4px; border-left: 3px solid #E60012;" id="modalAssignmentStatus"></div>
-</div>
+                    <div class="modal-info-display" id="modalDateSubmitted"></div>
+                </div>
+                <div class="form-group">
+                    <label>Assignment Status:</label>
+                    <div class="modal-info-display" id="modalAssignmentStatus"></div>
+                </div>
+                <div class="form-group" id="documentSection" style="display: none;">
+                    <label>Supporting Document:</label>
+                    <div class="modal-info-display">
+                        <a href="#" id="documentLink" class="document-link" target="_blank">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+                            </svg>
+                            View Document
+                        </a>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -1503,8 +1377,20 @@ if (empty($user['department']) || $user['department'] === null) {
         function closeReportModal() {
             document.getElementById('reportModal').classList.remove('show');
         }
-        function viewRisk(id, categories, description, cause, date, isAssigned) {
-            document.getElementById('modalRiskCategory').textContent = categories || 'No categories specified';
+        
+        function viewRisk(id, categories, description, cause, date, isAssigned, documentPath, documentFilename) {
+            // Parse and display categories properly
+            try {
+                const parsedCategories = JSON.parse(categories);
+                if (Array.isArray(parsedCategories)) {
+                    document.getElementById('modalRiskCategory').textContent = parsedCategories.join(', ');
+                } else {
+                    document.getElementById('modalRiskCategory').textContent = categories;
+                }
+            } catch (e) {
+                document.getElementById('modalRiskCategory').textContent = categories || 'No categories specified';
+            }
+            
             document.getElementById('modalRiskDescription').textContent = description;
             document.getElementById('modalCauseOfRisk').textContent = cause;
             const dateObj = new Date(date);
@@ -1514,7 +1400,7 @@ if (empty($user['department']) || $user['department'] === null) {
                 day: 'numeric'
             });
             
-            // Add assignment status to modal
+            // Assignment status
             const assignmentStatus = document.getElementById('modalAssignmentStatus');
             if (assignmentStatus) {
                 if (isAssigned) {
@@ -1524,24 +1410,29 @@ if (empty($user['department']) || $user['department'] === null) {
                 }
             }
             
+            const documentSection = document.getElementById('documentSection');
+            const documentLink = document.getElementById('documentLink');
+            if (documentPath && documentPath.trim() !== '') {
+                documentSection.style.display = 'block';
+                documentLink.href = documentPath;
+                
+                // Use original filename if available, otherwise extract from path
+                const filename = documentFilename && documentFilename.trim() !== '' ? documentFilename : (documentPath.split('/').pop() || 'View Document');
+                documentLink.innerHTML = `
+                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+                    </svg>
+                    ${filename}
+                `;
+            } else {
+                documentSection.style.display = 'none';
+            }
+            
             document.getElementById('riskModal').classList.add('show');
         }
         function closeModal() {
             document.getElementById('riskModal').classList.remove('show');
         }
-        
-        // Users can now only close the modal by clicking the X button
-        /*
-        // Close modal when clicking outside
-        window.onclick = function(event) {
-            const modals = document.querySelectorAll('.modal');
-            modals.forEach(modal => {
-                if (event.target === modal) {
-                    modal.classList.remove('show');
-                }
-            });
-        }
-        */
 
         function openChatbot() {
             const responses = [
@@ -1574,68 +1465,18 @@ if (empty($user['department']) || $user['department'] === null) {
             }
         }
         
-        /*
-        function toggleCategory(categoryId) {
-            const checkbox = document.getElementById(categoryId);
-            const categoryItem = checkbox.closest('.category-item');
-            const inputDiv = document.getElementById(categoryId + '_input');
+        function toggleMoneyAmount() {
+            const yesRadio = document.querySelector('input[name="involves_money_loss"][value="Yes"]');
+            const moneyField = document.getElementById('money_amount_field');
+            const moneyInput = document.getElementById('money_amount');
             
-            // Toggle checkbox
-            checkbox.checked = !checkbox.checked;
-            
-            // Toggle visual state
-            if (checkbox.checked) {
-                categoryItem.classList.add('selected');
-                inputDiv.classList.add('show');
-                setTimeout(() => {
-                    const input = inputDiv.querySelector('input, textarea');
-                    if (input) input.focus();
-                }, 300);
+            if (yesRadio.checked) {
+                moneyField.style.display = 'block';
+                moneyInput.required = true;
             } else {
-                categoryItem.classList.remove('selected');
-                inputDiv.classList.remove('show');
-                // Clear input value when unchecked
-                const input = inputDiv.querySelector('input, textarea');
-                if (input) input.value = '';
-            }
-        }
-        
-        document.addEventListener('DOMContentLoaded', function() {
-            const categoryInputs = document.querySelectorAll('.category-input input, .category-input textarea');
-            categoryInputs.forEach(input => {
-                input.addEventListener('click', function(e) {
-                    e.stopPropagation();
-                });
-                input.addEventListener('focus', function(e) {
-                    e.stopPropagation();
-                });
-            });
-            
-            const categoryInputDivs = document.querySelectorAll('.category-input');
-            categoryInputDivs.forEach(div => {
-                div.classList.remove('show');
-            });
-        });
-        */
-
-        /* Updated JavaScript to work with radio buttons instead of dropdowns */
-        function toggleCategoryInput(checkbox) {
-            const categoryName = checkbox.value.toLowerCase().replace(/[^a-z0-9]/g, '_');
-            const inputDiv = document.getElementById('input_' + categoryName);
-            
-            if (checkbox.checked) {
-                inputDiv.style.display = 'block';
-                const input = inputDiv.querySelector('select, textarea');
-                if (input) {
-                    input.required = true;
-                }
-            } else {
-                inputDiv.style.display = 'none';
-                const input = inputDiv.querySelector('select, textarea');
-                if (input) {
-                    input.required = false;
-                    input.value = '';
-                }
+                moneyField.style.display = 'none';
+                moneyInput.required = false;
+                moneyInput.value = '';
             }
         }
     </script>

@@ -30,7 +30,21 @@ $database = new Database();
 $db = $database->getConnection();
 
 try {
-    // Get system version from settings table or default
+    // Check if system_settings table exists, if not create it
+    $check_settings_table = "CREATE TABLE IF NOT EXISTS system_settings (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        setting_key VARCHAR(100) UNIQUE,
+        setting_value TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )";
+    $db->exec($check_settings_table);
+    
+    // Insert default system version if not exists
+    $insert_version = "INSERT IGNORE INTO system_settings (setting_key, setting_value) VALUES ('system_version', 'Airtel Risk Management v2.1.0')";
+    $db->exec($insert_version);
+    
+    // Get system version
     $version_query = "SELECT setting_value FROM system_settings WHERE setting_key = 'system_version' LIMIT 1";
     $version_stmt = $db->prepare($version_query);
     $version_stmt->execute();
@@ -39,49 +53,248 @@ try {
     // Test database connection
     $db_status = 'Connected';
     try {
-        $db->query('SELECT 1');
+        $test_query = $db->query('SELECT 1');
+        if ($test_query) {
+            $db_status = 'Connected';
+        }
     } catch (Exception $e) {
-        $db_status = 'Disconnected';
+        $db_status = 'Error: ' . $e->getMessage();
     }
+    
+    // Check if audit logs table exists and get last backup
+    $check_audit_table = "CREATE TABLE IF NOT EXISTS system_audit_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT,
+        action VARCHAR(255),
+        details TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ip_address VARCHAR(45)
+    )";
+    $db->exec($check_audit_table);
     
     // Get last backup date from audit logs
     $backup_query = "SELECT timestamp FROM system_audit_logs WHERE action LIKE '%backup%' ORDER BY timestamp DESC LIMIT 1";
     $backup_stmt = $db->prepare($backup_query);
     $backup_stmt->execute();
-    $last_backup = $backup_stmt->fetchColumn() ?: date('Y-m-d H:i:s');
+    $last_backup_raw = $backup_stmt->fetchColumn();
     
-    // Calculate total storage used (approximate based on record counts)
-    $storage_query = "SELECT 
-        (SELECT COUNT(*) FROM users) * 2 + 
-        (SELECT COUNT(*) FROM risk_incidents) * 5 + 
-        (SELECT COUNT(*) FROM system_audit_logs) * 1 as total_kb";
-    $storage_stmt = $db->prepare($storage_query);
-    $storage_stmt->execute();
-    $storage_kb = $storage_stmt->fetchColumn() ?: 0;
-    $storage_used = round($storage_kb / 1024, 2) . ' MB';
+    if ($last_backup_raw) {
+        $last_backup = date('M d, Y H:i:s', strtotime($last_backup_raw));
+    } else {
+        $last_backup = 'No backups found';
+    }
+    
+    // Calculate total storage used with better error handling
+    $storage_used = 'Calculating...';
+    try {
+        // Get database size information
+        $db_name = 'airtel_risk_system'; // Database name
+        $size_query = "SELECT 
+            ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS db_size_mb
+            FROM information_schema.tables 
+            WHERE table_schema = ?";
+        $size_stmt = $db->prepare($size_query);
+        $size_stmt->execute([$db_name]);
+        $db_size = $size_stmt->fetchColumn();
+        
+        if ($db_size) {
+            $storage_used = $db_size . ' MB';
+        } else {
+            // Fallback: estimate based on record counts
+            $count_queries = [
+                "SELECT COUNT(*) FROM users",
+                "SELECT COUNT(*) FROM user_sessions", 
+                "SELECT COUNT(*) FROM system_audit_logs"
+            ];
+            
+            $total_records = 0;
+            foreach ($count_queries as $query) {
+                try {
+                    $stmt = $db->prepare($query);
+                    $stmt->execute();
+                    $total_records += $stmt->fetchColumn();
+                } catch (Exception $e) {
+                    // Table might not exist, continue
+                }
+            }
+            
+            // Estimate 2KB per record on average
+            $estimated_mb = round(($total_records * 2) / 1024, 2);
+            $storage_used = $estimated_mb . ' MB (estimated)';
+        }
+        
+    } catch (Exception $e) {
+        $storage_used = 'Unable to calculate';
+    }
     
 } catch (Exception $e) {
     $system_version = 'Airtel Risk Management v2.1.0';
-    $db_status = 'Error';
-    $last_backup = 'Unknown';
-    $storage_used = 'Unknown';
+    $db_status = 'Connection Error';
+    $last_backup = 'Unable to check';
+    $storage_used = 'Unable to calculate';
 }
 
 if (isset($_POST['perform_backup'])) {
     try {
+        $backup_format = $_POST['backup_format'] ?? 'sql';
+        $backup_tables = $_POST['backup_tables'] ?? 'all';
+        
+        // Create backups directory if it doesn't exist
+        $backup_dir = 'backups/';
+        if (!file_exists($backup_dir)) {
+            mkdir($backup_dir, 0755, true);
+        }
+        
+        $timestamp = date('Y-m-d_H-i-s');
+        $filename = "airtel_risk_system_backup_{$timestamp}";
+        
+        // Get database connection details
+        $host = 'localhost'; // Update with your host
+        $username = 'root'; // Update with your username
+        $password = ''; // Update with your password
+        $database = 'airtel_risk_system';
+        
+        switch ($backup_format) {
+            case 'sql':
+                $backup_file = $backup_dir . $filename . '.sql';
+                $command = "mysqldump --host={$host} --user={$username} --password={$password} {$database} > {$backup_file}";
+                exec($command, $output, $return_code);
+                break;
+                
+            case 'csv':
+                $backup_file = $backup_dir . $filename . '_csv.zip';
+                createCSVBackup($db, $backup_file, $backup_tables);
+                break;
+                
+            case 'json':
+                $backup_file = $backup_dir . $filename . '.json';
+                createJSONBackup($db, $backup_file, $backup_tables);
+                break;
+                
+            case 'xml':
+                $backup_file = $backup_dir . $filename . '.xml';
+                createXMLBackup($db, $backup_file, $backup_tables);
+                break;
+        }
+        
         // Log backup action
         $backup_stmt = $db->prepare("INSERT INTO system_audit_logs (user, action, details, ip_address, user_id) VALUES (?, ?, ?, ?, ?)");
         $backup_stmt->execute([
             $_SESSION['user_name'] ?? 'Admin',
-            'System Backup Performed',
-            'Manual backup initiated from admin dashboard',
+            'Database Backup Performed',
+            "Backup created: {$filename} (Format: {$backup_format})",
             $_SERVER['REMOTE_ADDR'],
             $_SESSION['user_id'] ?? null
         ]);
-        $success_message = "System backup completed successfully.";
+        
+        $success_message = "Database backup completed successfully. File: {$filename}";
+        $backup_file_path = $backup_file;
+        $backup_filename = basename($backup_file);
+        
     } catch (Exception $e) {
         $error_message = "Backup failed: " . $e->getMessage();
     }
+}
+
+if (isset($_GET['download_backup']) && isset($_GET['file'])) {
+    $file_path = 'backups/' . basename($_GET['file']);
+    if (file_exists($file_path)) {
+        header('Content-Description: File Transfer');
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . basename($file_path) . '"');
+        header('Expires: 0');
+        header('Cache-Control: must-revalidate');
+        header('Pragma: public');
+        header('Content-Length: ' . filesize($file_path));
+        readfile($file_path);
+        exit;
+    }
+}
+
+function createCSVBackup($db, $backup_file, $backup_tables) {
+    $zip = new ZipArchive();
+    $zip->open($backup_file, ZipArchive::CREATE);
+    
+    if ($backup_tables === 'all') {
+        $tables = $db->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+    } else {
+        $tables = explode(',', $backup_tables);
+    }
+    
+    foreach ($tables as $table) {
+        $csv_content = '';
+        $result = $db->query("SELECT * FROM `{$table}`");
+        
+        // Get column names
+        if ($result->rowCount() > 0) {
+            $columns = array_keys($result->fetch(PDO::FETCH_ASSOC));
+            $csv_content .= implode(',', $columns) . "\n";
+            
+            // Reset result
+            $result = $db->query("SELECT * FROM `{$table}`");
+            while ($row = $result->fetch(PDO::FETCH_ASSOC)) {
+                $csv_content .= implode(',', array_map(function($field) {
+                    return '"' . str_replace('"', '""', $field) . '"';
+                }, $row)) . "\n";
+            }
+        }
+        
+        $zip->addFromString("{$table}.csv", $csv_content);
+    }
+    
+    $zip->close();
+}
+
+function createJSONBackup($db, $backup_file, $backup_tables) {
+    $backup_data = [];
+    
+    if ($backup_tables === 'all') {
+        $tables = $db->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+    } else {
+        $tables = explode(',', $backup_tables);
+    }
+    
+    foreach ($tables as $table) {
+        $result = $db->query("SELECT * FROM `{$table}`");
+        $backup_data[$table] = $result->fetchAll(PDO::FETCH_ASSOC);
+    }
+    
+    file_put_contents($backup_file, json_encode($backup_data, JSON_PRETTY_PRINT));
+}
+
+function createXMLBackup($db, $backup_file, $backup_tables) {
+    $xml = new DOMDocument('1.0', 'UTF-8');
+    $xml->formatOutput = true;
+    
+    $root = $xml->createElement('database_backup');
+    $root->setAttribute('database', 'airtel_risk_system');
+    $root->setAttribute('timestamp', date('Y-m-d H:i:s'));
+    $xml->appendChild($root);
+    
+    if ($backup_tables === 'all') {
+        $tables = $db->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+    } else {
+        $tables = explode(',', $backup_tables);
+    }
+    
+    foreach ($tables as $table) {
+        $table_element = $xml->createElement('table');
+        $table_element->setAttribute('name', $table);
+        
+        $result = $db->query("SELECT * FROM `{$table}`");
+        while ($row = $result->fetch(PDO::FETCH_ASSOC)) {
+            $row_element = $xml->createElement('row');
+            foreach ($row as $column => $value) {
+                $column_element = $xml->createElement($column, htmlspecialchars($value));
+                $row_element->appendChild($column_element);
+            }
+            $table_element->appendChild($row_element);
+        }
+        
+        $root->appendChild($table_element);
+    }
+    
+    $xml->save($backup_file);
 }
 
 if (isset($_POST['clear_cache'])) {
@@ -336,7 +549,7 @@ $upload_message = '';
 $upload_type = '';
 if (isset($_SESSION['upload_message'])) {
     $upload_message = $_SESSION['upload_message'];
-    $upload_type = $_SESSION['upload_type'];
+    $upload_type = $_SESSION['upload_type'] ?? 'info';
     unset($_SESSION['upload_message']);
     unset($_SESSION['upload_type']);
 }
@@ -1868,9 +2081,12 @@ $system_info = [
     </nav>
     
     <div class="main-content">
-        <?php if (isset($success_message)): ?>
-            <div class="success">✅ <?php echo $success_message; ?></div>
-        <?php endif; ?>
+        <?php 
+        // if (isset($success_message)): ?>
+            <!-- <div class="success">✅ <?php echo $success_message; ?></div> -->
+        <?php 
+        // endif; 
+        ?>
         <?php if (isset($error_message)): ?>
             <div class="error">❌ <?php echo $error_message; ?></div>
         <?php endif; ?>
@@ -2220,7 +2436,7 @@ $system_info = [
         <div id="settings-tab" class="tab-content">
             <div class="card">
                 <h2>⚙️ System Settings</h2>
-                <p>Configure system-wide settings and preferences.</p>
+                
                 
                 <!-- Removed language selection section and updated system information to use plain English -->
                 <div style="margin-top: 2rem;">
@@ -2246,247 +2462,518 @@ $system_info = [
                 </div>
 
                 <div style="margin-top: 2rem;">
-                    <h3>System Maintenance</h3>
-                    <div style="display: flex; gap: 1rem; margin-top: 1rem;">
-                        <!-- Updated buttons to prevent page reload and tab switching -->
-                        <button onclick="performBackup(event)" style="padding: 0.75rem 1.5rem; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                            Perform Backup
-                        </button>
-                        <button onclick="clearCache(event)" style="padding: 0.75rem 1.5rem; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                            Clear Cache
-                        </button>
-                    </div>
-                    <div id="maintenance-status" style="margin-top: 1rem;"></div>
+                    <h3>Database Backup</h3>
+                    
+                    
+                    <form method="POST" style="margin-top: 1rem;" onsubmit="return handleBackupSubmit(event);">
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem;">
+                            <div>
+                                <label for="backup_format" style="display: block; margin-bottom: 0.5rem; font-weight: bold;">Backup Format:</label>
+                                <select name="backup_format" id="backup_format" style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;">
+                                    <option value="sql">SQL Dump (.sql)</option>
+                                    <option value="csv">CSV Files (.zip)</option>
+                                    <option value="json">JSON Format (.json)</option>
+                                    <option value="xml">XML Format (.xml)</option>
+                                </select>
+                            </div>
+                            
+                            <div>
+                                <label for="backup_tables" style="display: block; margin-bottom: 0.5rem; font-weight: bold;">Tables to Backup:</label>
+                                <select name="backup_tables" id="backup_tables" style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;">
+                                    <option value="all">All Tables</option>
+                                    <option value="users,user_sessions">User Data Only</option>
+                                    <option value="system_audit_logs">Audit Logs Only</option>
+                                    <option value="system_settings">System Settings Only</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- Added hidden input to maintain current tab and made buttons inline -->
+                        <input type="hidden" name="current_tab" value="settings">
+                        <div style="display: flex; gap: 1rem; align-items: center;">
+                            <button type="submit" name="perform_backup" style="background: #007cba; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem;">
+                                Create Backup
+                            </button>
+                            
+                            <!-- Always visible download button -->
+                            <button type="button" id="downloadBackupBtn" onclick="downloadLatestBackup()" 
+                                    style="background: #28a745; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; <?php echo !isset($backup_filename) ? 'opacity: 0.5; cursor: not-allowed;' : ''; ?>"
+                                    <?php echo !isset($backup_filename) ? 'disabled' : ''; ?>>
+                                📥 Download Backup
+                            </button>
+                        </div>
+                    </form>
+                    
+                    <?php if (isset($success_message)): ?>
+                        <!-- Modified success message to auto-hide after 1 second -->
+                        <div id="success-message" style="background: #d4edda; color: #155724; padding: 1rem; border-radius: 4px; margin-top: 1rem; border: 1px solid #c3e6cb;">
+                            ✅ <?php echo $success_message; ?>
+                        </div>
+                        <script>
+                            setTimeout(function() {
+                                var successMsg = document.getElementById('success-message');
+                                if (successMsg) {
+                                    successMsg.style.transition = 'opacity 0.5s';
+                                    successMsg.style.opacity = '0';
+                                    setTimeout(function() {
+                                        successMsg.style.display = 'none';
+                                    }, 500);
+                                }
+                                // Enable download button
+                                var downloadBtn = document.getElementById('downloadBackupBtn');
+                                if (downloadBtn) {
+                                    downloadBtn.disabled = false;
+                                    downloadBtn.style.opacity = '1';
+                                    downloadBtn.style.cursor = 'pointer';
+                                }
+                            }, 1000);
+                            
+                            showTab('settings');
+                        </script>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
     </div>
 </div>
 
+<!-- Audit Logs Modal -->
+<div id="auditModal" class="audit-modal">
+    <div class="audit-modal-content">
+        <div class="audit-modal-header">
+            <h3 class="audit-modal-title">Audit Logs</h3>
+            <button class="audit-close" onclick="closeAuditModal()">&times;</button>
+        </div>
+        <div class="audit-modal-body">
+            <div class="audit-filters">
+                <select id="userFilter" class="audit-filter-select">
+                    <option value="">All Users</option>
+                    <!-- Populate with users from the database -->
+                </select>
+                <select id="actionFilter" class="audit-filter-select">
+                    <option value="">All Actions</option>
+                    <!-- Populate with actions from the database -->
+                </select>
+                <input type="date" id="dateFrom" class="audit-filter-select">
+                <input type="date" id="dateTo" class="audit-filter-select">
+                <button onclick="applyFilters()" class="btn btn-primary">Apply Filters</button>
+            </div>
+            <div class="audit-table-container">
+                <table class="audit-table">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>User</th>
+                            <th>Action</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Audit logs will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
+            <div class="audit-loading">Loading...</div>
+        </div>
+    </div>
+</div>
+
+<!-- Suspicious Activities Modal -->
+<div id="suspiciousActivitiesModal" class="audit-modal">
+    <div class="audit-modal-content">
+        <div class="audit-modal-header">
+            <h3 class="audit-modal-title">Suspicious Activities</h3>
+            <button class="audit-close" onclick="closeSuspiciousActivitiesModal()">&times;</button>
+        </div>
+        <div class="audit-modal-body">
+            <div class="audit-filters">
+                <select id="severityFilter" class="audit-filter-select">
+                    <option value="">All Severities</option>
+                    <option value="critical">Critical</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                </select>
+                <button onclick="loadSuspiciousActivities()" class="btn btn-primary">Apply Filters</button>
+            </div>
+            <div class="audit-table-container">
+                <table class="audit-table" id="suspiciousActivitiesTable">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>User</th>
+                            <th>Action</th>
+                            <th>Details</th>
+                            <th>Severity</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Suspicious activities will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
+            <div class="audit-loading">Loading...</div>
+        </div>
+    </div>
+</div>
+
+<!-- Login History Modal -->
+<div id="loginHistoryModal" class="audit-modal">
+    <div class="audit-modal-content">
+        <div class="audit-modal-header">
+            <h3 class="audit-modal-title">Login History</h3>
+            <button class="audit-close" onclick="closeLoginHistoryModal()">&times;</button>
+        </div>
+        <div class="audit-modal-body">
+            <div class="audit-table-container">
+                <table class="audit-table" id="loginHistoryTable">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>User</th>
+                            <th>Action</th>
+                            <th>Details</th>
+                            <th>IP Address</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Login history will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
+            <div class="audit-loading">Loading...</div>
+        </div>
+    </div>
+</div>
+
 <script>
-function showTab(evt, tabName) {
-    evt.preventDefault();
+function showTab(event, tabId) {
+    event.preventDefault();
     var i, tabcontent, tablinks;
-    
-    // Hide all tab content
     tabcontent = document.getElementsByClassName("tab-content");
     for (i = 0; i < tabcontent.length; i++) {
         tabcontent[i].classList.remove("active");
     }
-    
-    // Remove active class from all tab links
-    tablinks = document.querySelectorAll(".nav-item a");
+    tablinks = document.getElementsByClassName("nav-item");
     for (i = 0; i < tablinks.length; i++) {
-        tablinks[i].classList.remove("active");
+        tablinks[i].querySelector('a').classList.remove("active");
     }
-    
-    // Show the selected tab and mark the button as active
-    document.getElementById(tabName + "-tab").classList.add("active");
-    evt.currentTarget.classList.add("active");
-    
-    // Store current tab in sessionStorage to maintain state
-    sessionStorage.setItem('currentTab', tabName);
+    document.getElementById(tabId + "-tab").classList.add("active");
+    event.currentTarget.classList.add("active");
 }
 
-function performBackup(event) {
-    event.preventDefault();
-    const statusDiv = document.getElementById('maintenance-status');
-    statusDiv.innerHTML = '<div style="color: blue; padding: 10px; background: #e3f2fd; border-radius: 4px;">Performing backup...</div>';
-    
-    fetch(window.location.href, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: 'perform_backup=1'
-    })
-    .then(response => response.text())
-    .then(data => {
-        statusDiv.innerHTML = '<div style="color: green; padding: 10px; background: #e8f5e8; border-radius: 4px;">Backup completed successfully!</div>';
-    })
-    .catch(error => {
-        statusDiv.innerHTML = '<div style="color: red; padding: 10px; background: #ffebee; border-radius: 4px;">Backup failed. Please try again.</div>';
-    });
-}
-
-function clearCache(event) {
-    event.preventDefault();
-    const statusDiv = document.getElementById('maintenance-status');
-    statusDiv.innerHTML = '<div style="color: blue; padding: 10px; background: #e3f2fd; border-radius: 4px;">Clearing cache...</div>';
-    
-    fetch(window.location.href, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: 'clear_cache=1'
-    })
-    .then(response => response.text())
-    .then(data => {
-        statusDiv.innerHTML = '<div style="color: green; padding: 10px; background: #e8f5e8; border-radius: 4px;">Cache cleared successfully!</div>';
-    })
-    .catch(error => {
-        statusDiv.innerHTML = '<div style="color: red; padding: 10px; background: #ffebee; border-radius: 4px;">Cache clearing failed. Please try again.</div>';
-    });
-}
-
-document.addEventListener('DOMContentLoaded', function() {
-    const currentTab = sessionStorage.getItem('currentTab');
-    if (currentTab) {
-        const tabLink = document.querySelector(`a[onclick*="${currentTab}"]`);
-        if (tabLink) {
-            tabLink.click();
-        }
-    }
-});
-
-// Tab switching functionality
-function showTab(evt, tabName) {
-    var i, tabcontent, tablinks;
-    
-    // Hide all tab content
-    tabcontent = document.getElementsByClassName("tab-content");
-    for (i = 0; i < tabcontent.length; i++) {
-        tabcontent[i].classList.remove("active");
-    }
-    
-    // Remove active class from all tab links
-    tablinks = document.querySelectorAll(".nav-item a");
-    for (i = 0; i < tablinks.length; i++) {
-        tablinks[i].classList.remove("active");
-    }
-    
-    // Show the selected tab and mark the button as active
-    document.getElementById(tabName + "-tab").classList.add("active");
-    evt.currentTarget.classList.add("active");
-}
-
-// Audit log filtering functionality
 function filterAuditLogTable() {
-    const searchInput = document.getElementById('auditLogSearchInput').value.toLowerCase();
-    const userFilter = document.getElementById('auditLogFilterUser').value.toLowerCase();
-    const actionFilter = document.getElementById('auditLogFilterAction').value.toLowerCase();
-    const fromDate = document.getElementById('auditLogFilterFromDate').value;
-    const toDate = document.getElementById('auditLogFilterToDate').value;
-    
-    const table = document.getElementById('auditLogTable');
-    const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
-    
-    for (let i = 0; i < rows.length; i++) {
-        const cells = rows[i].getElementsByTagName('td');
-        if (cells.length === 0) continue;
-        
-        const timestamp = cells[0].textContent;
-        const user = cells[1].textContent.toLowerCase();
-        const action = cells[2].textContent.toLowerCase();
-        const details = cells[3].textContent.toLowerCase();
-        
-        let showRow = true;
-        
-        // Search filter
-        if (searchInput && !user.includes(searchInput) && !action.includes(searchInput) && !details.includes(searchInput)) {
+    var searchTerm = document.getElementById("auditLogSearchInput").value.toLowerCase();
+    var userRoleFilter = document.getElementById("auditLogFilterUser").value.toLowerCase();
+    var actionFilter = document.getElementById("auditLogFilterAction").value.toLowerCase();
+    var fromDate = document.getElementById("auditLogFilterFromDate").value;
+    var toDate = document.getElementById("auditLogFilterToDate").value;
+    var table = document.getElementById("auditLogTable");
+    var tr = table.getElementsByTagName("tr");
+
+    for (var i = 1; i < tr.length; i++) {
+        var td = tr[i].getElementsByTagName("td");
+        var timestamp = td[0].textContent.toLowerCase();
+        var user = td[1].textContent.toLowerCase();
+        var action = td[2].textContent.toLowerCase();
+        var details = td[3].textContent.toLowerCase();
+        var userRole = document.getElementById("auditLogFilterUser").value.toLowerCase();
+        var actionType = document.getElementById("auditLogFilterAction").value.toLowerCase();
+
+        var showRow = true;
+
+        if (searchTerm && !(user.includes(searchTerm) || action.includes(searchTerm) || details.includes(searchTerm) || timestamp.includes(searchTerm))) {
             showRow = false;
         }
-        
-        // User role filter
-        if (userFilter && !user.includes(userFilter)) {
+
+        if (userRoleFilter && !user.includes(userRoleFilter)) {
             showRow = false;
         }
-        
-        // Action filter
+
         if (actionFilter && !action.includes(actionFilter)) {
             showRow = false;
         }
-        
-        // Date filters
-        if (fromDate || toDate) {
-            const rowDate = new Date(timestamp).toISOString().split('T')[0];
-            if (fromDate && rowDate < fromDate) showRow = false;
-            if (toDate && rowDate > toDate) showRow = false;
+
+        if (fromDate) {
+            var logDate = new Date(timestamp);
+            var from = new Date(fromDate);
+            if (logDate < from) {
+                showRow = false;
+            }
         }
-        
-        rows[i].style.display = showRow ? '' : 'none';
+
+        if (toDate) {
+            var logDate = new Date(timestamp);
+            var to = new Date(toDate);
+            if (logDate > to) {
+                showRow = false;
+            }
+        }
+
+        if (showRow) {
+            tr[i].style.display = "";
+        } else {
+            tr[i].style.display = "none";
+        }
     }
 }
 
-// Export audit logs with filters
 function exportAuditLogsWithFilters() {
-    const searchTerm = document.getElementById('auditLogSearchInput').value;
-    const userRoleFilter = document.getElementById('auditLogFilterUser').value;
-    const actionFilter = document.getElementById('auditLogFilterAction').value;
-    const fromDate = document.getElementById('auditLogFilterFromDate').value;
-    const toDate = document.getElementById('auditLogFilterToDate').value;
-    
-    // Create a form and submit it
-    const form = document.createElement('form');
+    var searchTerm = document.getElementById("auditLogSearchInput").value;
+    var userRoleFilter = document.getElementById("auditLogFilterUser").value;
+    var actionFilter = document.getElementById("auditLogFilterAction").value;
+    var fromDate = document.getElementById("auditLogFilterFromDate").value;
+    var toDate = document.getElementById("auditLogFilterToDate").value;
+
+    // Create a form dynamically
+    var form = document.createElement('form');
     form.method = 'POST';
+    form.action = 'admin_dashboard.php'; // Ensure this is the correct path to your script
     form.style.display = 'none';
-    
-    const fields = {
-        'ajax_action': 'export_audit_logs',
-        'search_term': searchTerm,
-        'user_role_filter': userRoleFilter,
-        'action_filter': actionFilter,
-        'from_date': fromDate,
-        'to_date': toDate
-    };
-    
-    for (const [key, value] of Object.entries(fields)) {
-        const input = document.createElement('input');
-        input.type = 'hidden';
-        input.name = key;
-        input.value = value;
-        form.appendChild(input);
-    }
-    
+
+    // Add the action to trigger the export
+    var actionInput = document.createElement('input');
+    actionInput.type = 'hidden';
+    actionInput.name = 'ajax_action';
+    actionInput.value = 'export_audit_logs';
+    form.appendChild(actionInput);
+
+    // Add filter parameters
+    var searchTermInput = document.createElement('input');
+    searchTermInput.type = 'hidden';
+    searchTermInput.name = 'search_term';
+    searchTermInput.value = searchTerm;
+    form.appendChild(searchTermInput);
+
+    var userRoleFilterInput = document.createElement('input');
+    userRoleFilterInput.type = 'hidden';
+    userRoleFilterInput.name = 'user_role_filter';
+    userRoleFilterInput.value = userRoleFilter;
+    form.appendChild(userRoleFilterInput);
+
+    var actionFilterInput = document.createElement('input');
+    actionFilterInput.type = 'hidden';
+    actionFilterInput.name = 'action_filter';
+    actionFilterInput.value = actionFilter;
+    form.appendChild(actionFilterInput);
+
+    var fromDateInput = document.createElement('input');
+    fromDateInput.type = 'hidden';
+    fromDateInput.name = 'from_date';
+    fromDateInput.value = fromDate;
+    form.appendChild(fromDateInput);
+
+    var toDateInput = document.createElement('input');
+    toDateInput.type = 'hidden';
+    toDateInput.name = 'to_date';
+    toDateInput.value = toDate;
+    form.appendChild(toDateInput);
+
+    // Append the form to the document and submit it
     document.body.appendChild(form);
     form.submit();
-    document.body.removeChild(form);
 }
 
-// Suspicious activities modal
+function openAuditModal() {
+    document.getElementById('auditModal').classList.add('show');
+}
+
+function closeAuditModal() {
+    document.getElementById('auditModal').classList.remove('show');
+}
+
 function showSuspiciousActivitiesModal() {
-    // Implementation for suspicious activities modal
-    alert('Suspicious Activities feature will be implemented in the next update.');
+    document.getElementById('suspiciousActivitiesModal').classList.add('show');
+    loadSuspiciousActivities();
 }
 
-// Login history modal
+function closeSuspiciousActivitiesModal() {
+    document.getElementById('suspiciousActivitiesModal').classList.remove('show');
+}
+
 function showLoginHistoryModal() {
-    // Implementation for login history modal
-    alert('Login History feature will be implemented in the next update.');
+    document.getElementById('loginHistoryModal').classList.add('show');
+    loadLoginHistory();
 }
 
-// Chatbot functionality
-function openChatBot() {
-    // Implementation for chatbot
-    alert('AI Assistant feature will be implemented in the next update.');
+function closeLoginHistoryModal() {
+    document.getElementById('loginHistoryModal').classList.remove('show');
 }
 
-// File upload validation
-function validateUpload() {
-    const fileInput = document.getElementById('bulk_file');
-    const file = fileInput.files[0];
-    
-    if (!file) {
-        alert('Please select a file to upload.');
-        return false;
-    }
-    
-    const allowedTypes = ['text/csv', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
-    if (!allowedTypes.includes(file.type)) {
-        alert('Please select a valid CSV or Excel file.');
-        return false;
-    }
-    
-    if (file.size > 10 * 1024 * 1024) {
-        alert('File size must be less than 10MB.');
-        return false;
-    }
-    
-    return true;
+function loadSuspiciousActivities(limit = 50, offset = 0, severity = '') {
+    var table = document.getElementById('suspiciousActivitiesTable');
+    var tbody = table.querySelector('tbody');
+    var loadingDiv = document.querySelector('#suspiciousActivitiesModal .audit-loading');
+
+    tbody.innerHTML = '';
+    loadingDiv.style.display = 'block';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', 'admin_dashboard.php', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        if (xhr.status === 200) {
+            var response = JSON.parse(xhr.responseText);
+            if (response.success) {
+                var activities = response.activities;
+                if (activities && activities.length > 0) {
+                    activities.forEach(function(activity) {
+                        var row = table.insertRow();
+                        row.insertCell().textContent = activity.timestamp;
+                        row.insertCell().textContent = activity.user;
+                        row.insertCell().textContent = activity.action;
+                        row.insertCell().textContent = activity.details;
+
+                        // Severity cell
+                        var severityCell = row.insertCell();
+                        var severityBadge = document.createElement('span');
+                        severityBadge.className = 'audit-badge audit-badge-' + activity.severity;
+                        severityBadge.textContent = activity.severity;
+                        severityCell.appendChild(severityBadge);
+
+                        // Actions cell
+                        var actionsCell = row.insertCell();
+                        if (activity.is_resolved == 0) {
+                            var resolveButton = document.createElement('button');
+                            resolveButton.className = 'resolve-btn';
+                            resolveButton.textContent = 'Resolve';
+                            resolveButton.onclick = function() {
+                                resolveSuspiciousActivity(activity.id, row);
+                            };
+                            actionsCell.appendChild(resolveButton);
+                        } else {
+                            actionsCell.textContent = 'Resolved';
+                        }
+                    });
+                } else {
+                    var noDataRow = table.insertRow();
+                    var noDataCell = noDataRow.insertCell();
+                    noDataCell.colSpan = 6;
+                    noDataCell.textContent = 'No suspicious activities found.';
+                    noDataCell.style.textAlign = 'center';
+                }
+            } else {
+                var errorRow = table.insertRow();
+                var errorCell = errorRow.insertCell();
+                errorCell.colSpan = 6;
+                errorCell.textContent = 'Failed to load suspicious activities.';
+                errorCell.style.textAlign = 'center';
+            }
+        } else {
+            var errorRow = table.insertRow();
+            var errorCell = errorRow.insertCell();
+            errorCell.colSpan = 6;
+            errorCell.textContent = 'An error occurred while loading suspicious activities.';
+            errorCell.style.textAlign = 'center';
+        }
+        loadingDiv.style.display = 'none';
+    };
+    xhr.onerror = function() {
+        var errorRow = table.insertRow();
+        var errorCell = errorRow.insertCell();
+        errorCell.colSpan = 6;
+        errorCell.textContent = 'An error occurred while loading suspicious activities.';
+        errorCell.style.textAlign = 'center';
+        loadingDiv.style.display = 'none';
+    };
+    xhr.send(JSON.stringify({
+        ajax_action: 'get_suspicious_activities',
+        limit: limit,
+        offset: offset,
+        severity: document.getElementById('severityFilter').value
+    }));
 }
 
-// View All Risks Modal functionality
+function resolveSuspiciousActivity(activityId, row) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', 'admin_dashboard.php', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        if (xhr.status === 200) {
+            var response = JSON.parse(xhr.responseText);
+            if (response.success) {
+                // Update the row to show that the activity is resolved
+                row.cells[5].innerHTML = 'Resolved';
+            } else {
+                alert('Failed to resolve activity.');
+            }
+        } else {
+            alert('An error occurred while resolving activity.');
+        }
+    };
+    xhr.onerror = function() {
+        alert('An error occurred while resolving activity.');
+    };
+    xhr.send(JSON.stringify({
+        ajax_action: 'resolve_suspicious_activity',
+        activity_id: activityId
+    }));
+}
+
+function loadLoginHistory(limit = 50, offset = 0) {
+    var table = document.getElementById('loginHistoryTable');
+    var tbody = table.querySelector('tbody');
+    var loadingDiv = document.querySelector('#loginHistoryModal .audit-loading');
+
+    tbody.innerHTML = '';
+    loadingDiv.style.display = 'block';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', 'admin_dashboard.php', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        if (xhr.status === 200) {
+            var response = JSON.parse(xhr.responseText);
+            if (response.success) {
+                var history = response.history;
+                if (history && history.length > 0) {
+                    history.forEach(function(login) {
+                        var row = table.insertRow();
+                        row.insertCell().textContent = login.timestamp;
+                        row.insertCell().textContent = login.user;
+                        row.insertCell().textContent = login.action;
+                        row.insertCell().textContent = login.details;
+                        row.insertCell().textContent = login.ip_address;
+                    });
+                } else {
+                    var noDataRow = table.insertRow();
+                    var noDataCell = noDataRow.insertCell();
+                    noDataCell.colSpan = 5;
+                    noDataCell.textContent = 'No login history found.';
+                    noDataCell.style.textAlign = 'center';
+                }
+            } else {
+                var errorRow = table.insertRow();
+                var errorCell = errorRow.insertCell();
+                errorCell.colSpan = 5;
+                errorCell.textContent = 'Failed to load login history.';
+                errorCell.style.textAlign = 'center';
+            }
+        } else {
+            var errorRow = table.insertRow();
+            var errorCell = errorRow.insertCell();
+            errorCell.colSpan = 5;
+            errorCell.textContent = 'An error occurred while loading login history.';
+            errorCell.style.textAlign = 'center';
+        }
+        loadingDiv.style.display = 'none';
+    };
+    xhr.onerror = function() {
+        var errorRow = table.insertRow();
+        var errorCell = errorRow.insertCell();
+        errorCell.colSpan = 5;
+        errorCell.textContent = 'An error occurred while loading login history.';
+        errorCell.style.textAlign = 'center';
+        loadingDiv.style.display = 'none';
+    };
+    xhr.send(JSON.stringify({
+        ajax_action: 'get_login_history',
+        limit: limit,
+        offset: offset
+    }));
+}
+
 function openViewAllModal() {
     document.getElementById('viewAllModal').classList.add('show');
 }
@@ -2495,142 +2982,198 @@ function closeViewAllModal() {
     document.getElementById('viewAllModal').classList.remove('show');
 }
 
-function filterModalRisks() {
-    const fromDate = document.getElementById('modalDateFrom').value;
-    const toDate = document.getElementById('modalDateTo').value;
-    const department = document.getElementById('modalDepartmentFilter').value.toLowerCase();
-    
-    const table = document.getElementById('modalRiskTable');
-    const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
-    
-    for (let i = 0; i < rows.length; i++) {
-        const cells = rows[i].getElementsByTagName('td');
-        if (cells.length === 0) continue;
-        
-        const riskDepartment = cells[2].textContent.toLowerCase();
-        const dateCell = cells[7].textContent;
-        const riskDate = new Date(dateCell).toISOString().split('T')[0];
-        
-        let showRow = true;
-        
-        // Department filter
-        if (department && !riskDepartment.includes(department)) {
-            showRow = false;
+function handleAjaxUpload(event) {
+    event.preventDefault();
+
+    var form = document.getElementById('bulkUploadForm');
+    var fileInput = document.getElementById('bulk_file');
+    var uploadStatus = document.getElementById('uploadStatus');
+
+    if (fileInput.files.length === 0) {
+        uploadStatus.innerHTML = '<div class="error">Please select a file to upload.</div>';
+        return false;
+    }
+
+    var file = fileInput.files[0];
+    var formData = new FormData();
+    formData.append('bulk_file', file);
+    formData.append('ajax_upload', '1');
+
+    uploadStatus.innerHTML = '<div class="info">Uploading...</div>';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', 'admin_dashboard.php', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        if (xhr.status === 200) {
+            var response = JSON.parse(xhr.responseText);
+            if (response.success) {
+                uploadStatus.innerHTML = '<div class="success">' + response.message + '</div>';
+            } else {
+                uploadStatus.innerHTML = '<div class="error">' + response.message + '</div>';
+            }
+        } else {
+            uploadStatus.innerHTML = '<div class="error">Upload failed with status: ' + xhr.status + '</div>';
         }
-        
-        // Date filters
-        if (fromDate && riskDate < fromDate) showRow = false;
-        if (toDate && riskDate > toDate) showRow = false;
-        
-        rows[i].style.display = showRow ? '' : 'none';
+    };
+    xhr.onerror = function() {
+        uploadStatus.innerHTML = '<div class="error">Upload failed. Please check your connection.</div>';
+    };
+    xhr.send(formData);
+
+    return false;
+}
+
+function downloadTemplate() {
+    window.location.href = '?ajax_download_template=1';
+}
+
+function filterModalRisks() {
+    var fromDate = document.getElementById("modalDateFrom").value;
+    var toDate = document.getElementById("modalDateTo").value;
+    var department = document.getElementById("modalDepartmentFilter").value;
+
+    var table = document.getElementById("modalRiskTable");
+    var rows = table.getElementsByTagName("tr");
+
+    for (var i = 1; i < rows.length; i++) {
+        var row = rows[i];
+        var dateCell = row.getElementsByTagName("td")[7];
+        var departmentCell = row.getElementsByTagName("td")[2];
+
+        if (dateCell && departmentCell) {
+            var rowDate = new Date(dateCell.textContent);
+            var rowDepartment = departmentCell.textContent;
+
+            var showRow = true;
+
+            if (fromDate) {
+                var from = new Date(fromDate);
+                if (rowDate < from) {
+                    showRow = false;
+                }
+            }
+
+            if (toDate) {
+                var to = new Date(toDate);
+                if (rowDate > to) {
+                    showRow = false;
+                }
+            }
+
+            if (department && rowDepartment !== department) {
+                showRow = false;
+            }
+
+            if (showRow) {
+                row.style.display = "";
+            } else {
+                row.style.display = "none";
+            }
+        }
     }
 }
 
 function clearFilters() {
-    document.getElementById('modalDateFrom').value = '';
-    document.getElementById('modalDateTo').value = '';
-    document.getElementById('modalDepartmentFilter').value = '';
+    document.getElementById("modalDateFrom").value = "";
+    document.getElementById("modalDateTo").value = "";
+    document.getElementById("modalDepartmentFilter").value = "";
     filterModalRisks();
 }
 
 function downloadFilteredRisks() {
-    const fromDate = document.getElementById('modalDateFrom').value;
-    const toDate = document.getElementById('modalDateTo').value;
-    const department = document.getElementById('modalDepartmentFilter').value;
-    
-    // Create form for download with filters
-    const form = document.createElement('form');
-    form.method = 'POST';
-    form.style.display = 'none';
-    
-    const fields = {
-        'download_filtered': '1',
-        'from_date': fromDate,
-        'to_date': toDate,
-        'department': department
-    };
-    
-    for (const [key, value] of Object.entries(fields)) {
-        const input = document.createElement('input');
-        input.type = 'hidden';
-        input.name = key;
-        input.value = value;
-        form.appendChild(input);
-    }
-    
-    document.body.appendChild(form);
-    form.submit();
-    document.body.removeChild(form);
-}
+    var fromDate = document.getElementById("modalDateFrom").value;
+    var toDate = document.getElementById("modalDateTo").value;
+    var department = document.getElementById("modalDepartmentFilter").value;
 
-// Close modals when clicking outside
-window.onclick = function(event) {
-    const viewAllModal = document.getElementById('viewAllModal');
-    if (event.target === viewAllModal) {
-        closeViewAllModal();
-    }
-}
+    // Prepare data for download
+    var csvContent = "data:text/csv;charset=utf-8,";
+    csvContent += "Risk ID,Risk Name,Department,Risk Score,Risk Level,Status,Reported By,Date\n";
 
-function downloadTemplate() {
-    const link = document.createElement('a');
-    link.href = '?ajax_download_template=1';
-    link.download = 'risk_data_template.csv';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-}
+    var table = document.getElementById("modalRiskTable");
+    var rows = table.getElementsByTagName("tr");
 
-function handleAjaxUpload(event) {
-    event.preventDefault();
-    
-    const fileInput = document.getElementById('bulk_file');
-    const file = fileInput.files[0];
-    const statusDiv = document.getElementById('uploadStatus');
-    
-    if (!file) {
-        statusDiv.innerHTML = '<div style="color: red; padding: 10px; background: #ffebee; border-radius: 4px;">Please select a file to upload.</div>';
-        return false;
-    }
-    
-    const allowedTypes = ['text/csv', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
-    if (!allowedTypes.includes(file.type)) {
-        statusDiv.innerHTML = '<div style="color: red; padding: 10px; background: #ffebee; border-radius: 4px;">Please select a valid CSV or Excel file.</div>';
-        return false;
-    }
-    
-    if (file.size > 10 * 1024 * 1024) {
-        statusDiv.innerHTML = '<div style="color: red; padding: 10px; background: #ffebee; border-radius: 4px;">File size must be less than 10MB.</div>';
-        return false;
-    }
-    
-    // Show loading message
-    statusDiv.innerHTML = '<div style="color: blue; padding: 10px; background: #e3f2fd; border-radius: 4px;">Uploading file, please wait...</div>';
-    
-    // Create FormData object
-    const formData = new FormData();
-    formData.append('bulk_file', file);
-    formData.append('ajax_upload', '1');
-    
-    // Send AJAX request
-    fetch(window.location.href, {
-        method: 'POST',
-        body: formData
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            statusDiv.innerHTML = '<div style="color: green; padding: 10px; background: #e8f5e8; border-radius: 4px;">' + data.message + '</div>';
-            // Reset form
-            document.getElementById('bulkUploadForm').reset();
-        } else {
-            statusDiv.innerHTML = '<div style="color: red; padding: 10px; background: #ffebee; border-radius: 4px;">' + data.message + '</div>';
+    for (var i = 1; i < rows.length; i++) {
+        var row = rows[i];
+        if (row.style.display !== "none") {
+            var rowData = [];
+            for (var j = 0; j < 8; j++) {
+                var cell = row.getElementsByTagName("td")[j];
+                rowData.push(cell.textContent);
+            }
+            csvContent += rowData.join(",") + "\n";
         }
-    })
-    .catch(error => {
-        statusDiv.innerHTML = '<div style="color: red; padding: 10px; background: #ffebee; border-radius: 4px;">Upload failed: ' + error.message + '</div>';
-    });
-    
-    return false;
+    }
+
+    // Create download link
+    var encodedUri = encodeURI(csvContent);
+    var link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "filtered_risks.csv");
+    document.body.appendChild(link); // Required for FF
+
+    link.click(); // This will download the CSV file
+}
+
+function handleBackupSubmit(event) {
+    // Add hidden input to maintain settings tab after form submission
+    var form = event.target;
+    var hiddenInput = document.createElement('input');
+    hiddenInput.type = 'hidden';
+    hiddenInput.name = 'stay_in_settings';
+    hiddenInput.value = '1';
+    form.appendChild(hiddenInput);
+    return true;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    <?php if (isset($_POST['stay_in_settings']) || isset($success_message) || isset($error_message)): ?>
+        // Stay in settings tab after backup operation
+        showTab({preventDefault: function(){}}, 'settings');
+    <?php endif; ?>
+});
+
+function showDatabaseTab() {
+    window.location.href = 'admin_dashboard.php';
+    setTimeout(function() {
+        if (window.showTab) {
+            showTab({preventDefault: function(){}}, 'database');
+        }
+    }, 100);
+}
+
+function showNotificationsTab() {
+    window.location.href = 'admin_dashboard.php';
+    setTimeout(function() {
+        if (window.showTab) {
+            showTab({preventDefault: function(){}}, 'notifications');
+        }
+    }, 100);
+}
+
+function showSettingsTab() {
+    window.location.href = 'admin_dashboard.php';
+    setTimeout(function() {
+        if (window.showTab) {
+            showTab({preventDefault: function(){}}, 'settings');
+        }
+    }, 100);
+}
+
+function handleBackupSubmit(event) {
+    // Let the form submit normally, but ensure we stay in settings tab
+    setTimeout(function() {
+        showTab('settings');
+    }, 100);
+    return true;
+}
+
+function downloadLatestBackup() {
+    <?php if (isset($backup_filename)): ?>
+        window.location.href = '?download_backup=1&file=<?php echo urlencode($backup_filename); ?>';
+    <?php else: ?>
+        alert('No backup file available. Please create a backup first.');
+    <?php endif; ?>
 }
 </script>
 </body>

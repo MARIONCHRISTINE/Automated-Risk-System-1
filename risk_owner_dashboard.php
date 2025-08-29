@@ -1564,52 +1564,6 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                         </div>
                     </div>
                 </div>
-                                <!-- Risk Owner Guidelines -->
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">🎯 Risk Owner Responsibilities (<?php echo $user['department']; ?>)</h3>
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem;">
-                        <div>
-                            <h4 style="color: #E60012; margin-bottom: 1rem;">✅ Your Department Access:</h4>
-                            <ul style="list-style-type: none; padding: 0;">
-                                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
-                                    <strong>🏢 Department Risks</strong><br>
-                                    <small>View and manage all risks within <?php echo $user['department']; ?></small>
-                                </li>
-                                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
-                                    <strong>📝 Risk Reporting</strong><br>
-                                    <small>Report new risks discovered in your department</small>
-                                </li>
-                                <li style="padding: 0.5rem 0;">
-                                    <strong>📊 Risk Assessment</strong><br>
-                                    <small>Complete risk assessments and treatment plans</small>
-                                </li>
-                            </ul>
-                        </div>
-                        <div>
-                            <h4 style="color: #28a745; margin-bottom: 1rem;">💡 Department Best Practices:</h4>
-                            <ul style="list-style-type: none; padding: 0;">
-                                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
-                                    <strong>🚨 Monitor Department Risks</strong><br>
-                                    <small>Keep track of all risks affecting your department</small>
-                                </li>
-                                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
-                                    <strong>⚡ Quick Response</strong><br>
-                                    <small>Address high-priority risks in your area promptly</small>
-                                </li>
-                                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
-                                    <strong>🤝 Team Collaboration</strong><br>
-                                    <small>Work with department colleagues on risk management</small>
-                                </li>
-                                <li style="padding: 0.5rem 0;">
-                                    <strong>📈 Progress Tracking</strong><br>
-                                    <small>Regularly update status of your assigned risks</small>
-                                </li>
-                            </ul>
-                        </div>
-                    </div>
-                </div>
                                 <!-- Quick Actions -->
                 <div class="card">
                     <div class="card-header">
@@ -2105,14 +2059,6 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 </div>
                                 <!-- Action Buttons and Search -->
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem;">
-                    <div style="display: flex; gap: 1rem;">
-                        <a href="report_risk.php" class="btn" style="background: #E60012; color: white; padding: 0.75rem 1.5rem; border-radius: 5px; text-decoration: none; font-weight: 500;">
-                            📝 Report New Risk
-                        </a>
-                        <a href="risk_owner_dashboard.php" class="btn" style="background: #6c757d; color: white; padding: 0.75rem 1.5rem; border-radius: 5px; text-decoration: none; font-weight: 500;">
-                            🏠 Back to Dashboard
-                        </a>
-                    </div>
                     <div>
                         <input type="text" id="searchRisks" placeholder="Search risks..." style="padding: 0.75rem; border: 1px solid #ddd; border-radius: 5px; width: 250px;">
                     </div>
@@ -2218,11 +2164,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                                 <a href="view_risk.php?id=<?php echo $risk['id']; ?>" style="background: #E60012; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; font-size: 0.8rem; cursor: pointer; text-decoration: none;">
                                                     View
                                                 </a>
-                                                <?php if ($risk['risk_status'] == 'pending'): ?>
-                                                    <a href="edit_risk.php?id=<?php echo $risk['id']; ?>" style="background: #ffc107; color: #212529; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; font-size: 0.8rem; cursor: pointer; text-decoration: none;">
-                                                        Edit
-                                                    </a>
-                                                <?php endif; ?>
+                                               
                                             </div>
                                         </td>
                                     </tr>
