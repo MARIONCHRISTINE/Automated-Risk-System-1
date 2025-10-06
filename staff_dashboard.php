@@ -7,10 +7,7 @@ include_once 'includes/auto_assignment.php';
 $database = new Database();
 $db = $database->getConnection();
 
-/**
- * Generate a unique Risk ID based on department, date, and sequential number
- * Format: DEPT_INITIAL/YYYY/MM/SEQUENTIAL_NUMBER
- */
+
 function generateRiskId($db, $department) {
     try {
         // Get department initial from departments table
@@ -43,7 +40,7 @@ function generateRiskId($db, $department) {
         $count_stmt->bindParam(':month', $month);
         $count_stmt->execute();
         
-        $count_result = $stmt->fetch(PDO::FETCH_ASSOC); // This line has a typo, it should be $count_stmt
+        $count_result = $count_stmt->fetch(PDO::FETCH_ASSOC);
         $sequential_number = $count_result['count'] + 1;
         
         // Generate the risk ID
@@ -354,10 +351,13 @@ if (isset($_GET['success'])) {
 }
 
 $query = "SELECT r.*, 
+                 u.username as reporter_username,
+                 u.full_name as reporter_full_name,
                  (SELECT COUNT(*) FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification') as has_document,
                  (SELECT rd.file_path FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification' LIMIT 1) as document_path,
                  (SELECT rd.original_filename FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification' LIMIT 1) as document_filename
           FROM risk_incidents r 
+          LEFT JOIN users u ON r.reported_by = u.id
           WHERE r.reported_by = :user_id 
           ORDER BY r.created_at DESC";
 
@@ -655,10 +655,25 @@ if (empty($user['department']) || $user['department'] === null) {
             gap: 1rem;
             margin-bottom: 1rem;
         }
+        .risk-info {
+            flex: 1;
+        }
+        .risk-id {
+            font-size: 0.9rem;
+            color: white;
+            background: #E60012;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            display: inline-block;
+            box-shadow: 0 2px 6px rgba(230, 0, 18, 0.3);
+        }
         .risk-name {
             font-weight: 600;
             color: #333;
-            flex: 1;
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
         }
         .view-btn {
             padding: 0.3rem 0.8rem;
@@ -670,6 +685,7 @@ if (empty($user['department']) || $user['department'] === null) {
             border: none;
             cursor: pointer;
             transition: background 0.3s;
+            white-space: nowrap;
         }
         .view-btn:hover {
             background: #B8000E;
@@ -701,13 +717,43 @@ if (empty($user['department']) || $user['department'] === null) {
             margin-bottom: 1.5rem;
         }
         .success {
-            background: #d4edda;
-            color: #155724;
+            background: linear-gradient(135deg, #E60012 0%, #B8000E 100%);
+            color: white;
             padding: 1.2rem;
             border-radius: 8px;
-            margin-bottom: 2rem;
-            border-left: 4px solid #28a745;
+            border-left: 4px solid #A50010;
             font-weight: 500;
+            box-shadow: 0 4px 12px rgba(230, 0, 18, 0.3);
+            animation: slideInRight 0.5s ease-out;
+            position: fixed;
+            top: 120px;
+            right: 20px;
+            max-width: 400px;
+            z-index: 2000;
+            overflow: hidden;
+        }
+        .success.fade-out {
+            animation: fadeOutRight 0.5s ease-out forwards;
+        }
+        @keyframes slideInRight {
+            from {
+                opacity: 0;
+                transform: translateX(100%);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        @keyframes fadeOutRight {
+            from {
+                opacity: 1;
+                transform: translateX(0);
+            }
+            to {
+                opacity: 0;
+                transform: translateX(100%);
+            }
         }
         .error {
             background: #f8d7da;
@@ -1038,7 +1084,6 @@ if (empty($user['department']) || $user['department'] === null) {
             font-style: italic;
         }
 
-        /* Added styling for form section headers */
         .form-label {
             display: block;
             margin-bottom: 0.8rem;
@@ -1064,7 +1109,6 @@ if (empty($user['department']) || $user['department'] === null) {
             margin-top: 4px;
         }
         
-        /* Added styles for cause of risk clickable cards */
         .cause-cards-container {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -1115,7 +1159,6 @@ if (empty($user['department']) || $user['department'] === null) {
             background: rgba(230, 0, 18, 0.08);
         }
         
-        /* Added styles for cause selection modal */
         .cause-modal {
             display: none;
             position: fixed;
@@ -1328,7 +1371,6 @@ if (empty($user['department']) || $user['department'] === null) {
             .modal-body {
                 padding: 1.5rem;
             }
-            /* Added responsive styles for cause cards */
             .cause-cards-container {
                 grid-template-columns: 1fr;
             }
@@ -1340,6 +1382,11 @@ if (empty($user['department']) || $user['department'] === null) {
             
             .cause-modal-body {
                 padding: 1.5rem;
+            }
+            .success {
+                right: 10px;
+                left: 10px;
+                max-width: calc(100% - 20px);
             }
         }
     </style>
@@ -1369,10 +1416,10 @@ if (empty($user['department']) || $user['department'] === null) {
         </header>
         <main class="main-content">
             <?php if (isset($success_message)): ?>
-                <div class="success">✅ <?php echo $success_message; ?></div>
+                <div class="success" id="successNotification"><?php echo $success_message; ?></div>
             <?php endif; ?>
             <?php if (isset($error_message)): ?>
-                <div class="error">❌ <?php echo $error_message; ?></div>
+                <div class="error"><?php echo $error_message; ?></div>
             <?php endif; ?>
             <div class="main-cards-layout">
                 <section class="hero">
@@ -1411,35 +1458,18 @@ if (empty($user['department']) || $user['department'] === null) {
                         <?php foreach (array_slice($user_risks, 0, 10) as $risk): ?>
                             <div class="risk-item">
                                 <div class="risk-header">
-                                    <div class="risk-name">
-                                        <?php 
-                                        $categories = json_decode($risk['risk_categories'], true);
-                                        if (is_array($categories)) {
-                                            echo htmlspecialchars(implode(', ', $categories));
-                                        } else {
-                                            echo htmlspecialchars($risk['risk_categories']);
-                                        }
-                                        ?>
+                                    <div class="risk-info"> 
+                                        <div class="risk-id"><?php echo htmlspecialchars($risk['risk_id'] ?? 'Pending'); ?></div>
+                                        <div class="risk-name"><?php echo htmlspecialchars($risk['risk_name']); ?></div>
                                     </div>
-                                    <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                        <?php if ($risk['risk_owner_id']): ?>
-                                            <span style="background: #d4edda; color: #155724; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">
-                                                ✅ Assigned
-                                            </span>
-                                        <?php else: ?>
-                                            <span style="background: #fff3cd; color: #856404; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">
-                                                🔄 Assigning...
-                                            </span>
-                                        <?php endif; ?>
-                                        <button class="view-btn" onclick="viewRisk(<?php echo $risk['id']; ?>, '<?php echo htmlspecialchars(json_encode(json_decode($risk['risk_categories'], true))); ?>', '<?php echo htmlspecialchars($risk['risk_description']); ?>', '<?php echo htmlspecialchars($risk['cause_of_risk']); ?>', '<?php echo $risk['created_at']; ?>', <?php echo $risk['risk_owner_id'] ? 'true' : 'false'; ?>, '<?php echo htmlspecialchars($risk['document_path'] ?? ''); ?>', '<?php echo htmlspecialchars($risk['document_filename'] ?? ''); ?>')">
-                                            View
-                                        </button>
-                                    </div>
+                                    <button class="view-btn" onclick='viewRisk(<?php echo json_encode($risk); ?>)'>
+                                        View
+                                    </button>
                                 </div>
                                 <div class="risk-meta">
                                     <span><?php echo date('M d, Y', strtotime($risk['created_at'])); ?></span>
                                     <?php if ($risk['risk_owner_id']): ?>
-                                        <span style="color:rgb(204, 11, 11);">• Risk Owner Assigned</span>
+                                        <span style="color:#E60012;">• Risk Owner Assigned</span>
                                     <?php endif; ?>
                                 </div>
                             </div>
@@ -1456,6 +1486,7 @@ if (empty($user['department']) || $user['department'] === null) {
         </main>
     </div>
     
+     <!-- Report New Risk Modal -->
     <div id="reportModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -1583,14 +1614,14 @@ if (empty($user['department']) || $user['department'] === null) {
                     <div class="form-group">
                         <label class="form-label">D. Risk Description *</label>
                         <div class="styled-textarea-container">
-                            <textarea name="risk_description" class="styled-textarea" required placeholder="Example: On January 15th, 2025, at the Kampala branch office, a system outage occurred due to server failure, causing customer service disruptions for 3 hours. The incident affected approximately 500 customers who were unable to access mobile money services. The root cause was identified as inadequate server maintenance and lack of backup systems." style="width: 100%; padding: 0.9rem; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem; height: 150px; resize: vertical;"></textarea>
+                            <textarea name="risk_description" class="styled-textarea" required placeholder="Example: On 2025/01/15 afternoon, at the Nairobi branch office, a system outage occurred due to server failure, causing customer service disruptions for 3 hours. Approximately 500 customers were unable to access Airtel mobile money." style="width: 100%; padding: 0.9rem; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem; height: 150px; resize: vertical;"></textarea>
                         </div>
                         <small class="info-text">Describe WHAT happened, WHERE it occurred, HOW it happened, and WHEN it took place</small>
                     </div>
 
                     <div class="form-group">
                         <label class="form-label">E. Cause of Risk *</label>
-                        <small class="info-text" style="display: block; margin-bottom: 15px;">Click on each category to select applicable causes. You can select from multiple categories.</small>
+                        <small class="info-text" style="display: block; margin-bottom: 15px;">Select ONE category below, then choose multiple causes within that category.</small>
                         
                         <div class="cause-cards-container">
                             <div class="cause-card" id="peopleCard" onclick="openCauseModal('people')">
@@ -1618,13 +1649,11 @@ if (empty($user['department']) || $user['department'] === null) {
                             </div>
                         </div>
                         
-                        <!-- Added visual summary of all selections -->
                         <div id="causeSelectionSummary" style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #E60012; display: none;">
                             <strong style="color: #E60012; display: block; margin-bottom: 10px;">Your Selections:</strong>
                             <div id="summaryContent" style="font-size: 0.9rem; color: #333;"></div>
                         </div>
                         
-                         <!-- Hidden inputs to store selections -->
                         <input type="hidden" name="cause_people_hidden" id="cause_people_hidden">
                         <input type="hidden" name="cause_process_hidden" id="cause_process_hidden">
                         <input type="hidden" name="cause_it_systems_hidden" id="cause_it_systems_hidden">
@@ -1649,8 +1678,8 @@ if (empty($user['department']) || $user['department'] === null) {
                         </div>
                         <div id="glpi-ir-section" class="conditional-section">
                             <label class="form-label">Provide IR Number *</label>
-                            <input type="text" name="glpi_ir_number" class="form-control" placeholder="Example: IR-2025-001234" style="width: 100%; padding: 0.9rem; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem;">
-                            <small class="info-text">Enter the Incident Report number from GLPI system</small>
+                            <input type="text" name="glpi_ir_number" class="form-control" placeholder="Example: 1234567" style="width: 100%; padding: 0.9rem; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem;">
+                            <small class="info-text">Enter the Ticket number from the raised incidentin GLPI system.</small>
                         </div>
                     </div>
 
@@ -1681,7 +1710,6 @@ if (empty($user['department']) || $user['department'] === null) {
         </div>
     </div>
 
-    <!-- Added modal for cause of risk selection -->
     <div id="causeModal" class="cause-modal">
         <div class="cause-modal-content">
             <div class="cause-modal-header">
@@ -1689,7 +1717,6 @@ if (empty($user['department']) || $user['department'] === null) {
                 <button class="cause-modal-close" onclick="closeCauseModal()">&times;</button>
             </div>
             <div class="cause-modal-body" id="causeModalBody">
-                <!-- Checkboxes will be dynamically inserted here -->
             </div>
             <div class="cause-modal-footer">
                 <button class="cause-modal-btn cause-modal-btn-cancel" onclick="closeCauseModal()">Cancel</button>
@@ -1706,8 +1733,24 @@ if (empty($user['department']) || $user['department'] === null) {
             </div>
             <div class="modal-body">
                 <div class="form-group">
+                    <label>Risk ID:</label>
+                    <div class="modal-info-display" id="modalRiskId"></div>
+                </div>
+                <div class="form-group">
+                    <label>Risk Name:</label>
+                    <div class="modal-info-display" id="modalRiskName"></div>
+                </div>
+                <div class="form-group">
                     <label>Risk Categories:</label>
                     <div class="modal-info-display" id="modalRiskCategory"></div>
+                </div>
+                <div class="form-group">
+                    <label>Date of Occurrence:</label>
+                    <div class="modal-info-display" id="modalDateOccurrence"></div>
+                </div>
+                <div class="form-group">
+                    <label>Department:</label>
+                    <div class="modal-info-display" id="modalDepartment"></div>
                 </div>
                 <div class="form-group">
                     <label>Risk Description:</label>
@@ -1716,6 +1759,22 @@ if (empty($user['department']) || $user['department'] === null) {
                 <div class="form-group">
                     <label>Cause of Risk:</label>
                     <div class="modal-info-display" id="modalCauseOfRisk"></div>
+                </div>
+                <div class="form-group">
+                    <label>Involves Money Loss:</label>
+                    <div class="modal-info-display" id="modalMoneyLoss"></div>
+                </div>
+                <div class="form-group" id="moneyRangeSection" style="display: none;">
+                    <label>Money Range:</label>
+                    <div class="modal-info-display" id="modalMoneyRange"></div>
+                </div>
+                <div class="form-group">
+                    <label>Reported to GLPI:</label>
+                    <div class="modal-info-display" id="modalGLPI"></div>
+                </div>
+                <div class="form-group" id="glpiNumberSection" style="display: none;">
+                    <label>GLPI IR Number:</label>
+                    <div class="modal-info-display" id="modalGLPINumber"></div>
                 </div>
                 <div class="form-group">
                     <label>Date Submitted:</label>
@@ -1804,20 +1863,24 @@ if (empty($user['department']) || $user['department'] === null) {
         };
         
         let currentCategory = '';
-        let selections = {
-            people: [],
-            process: [],
-            itSystems: [],
-            external: []
-        };
+        let activeCategory = '';
+        let selections = [];
         
         function openCauseModal(category) {
+            if (activeCategory !== category) {
+                activeCategory = category;
+                selections = [];
+                document.querySelectorAll('.cause-card').forEach(card => {
+                    card.classList.remove('has-selections');
+                });
+                document.getElementById('peopleCount').textContent = '0 selected';
+                document.getElementById('processCount').textContent = '0 selected';
+                document.getElementById('itSystemsCount').textContent = '0 selected';
+                document.getElementById('externalCount').textContent = '0 selected';
+            }
+            
             currentCategory = category;
             const data = causeData[category];
-            
-            console.log('[v0] Opening modal for category:', category);
-            console.log('[v0] Current selections for this category:', selections[category]);
-            console.log('[v0] All selections:', selections);
             
             document.getElementById('causeModalTitle').innerHTML = data.icon + ' ' + data.title;
             
@@ -1825,8 +1888,7 @@ if (empty($user['department']) || $user['department'] === null) {
             modalBody.innerHTML = '';
             
             data.options.forEach((option, index) => {
-                const isChecked = selections[category].includes(option);
-                console.log('[v0] Option:', option, 'Is checked:', isChecked);
+                const isChecked = selections.includes(option);
                 
                 const checkboxItem = document.createElement('div');
                 checkboxItem.className = 'checkbox-item' + (isChecked ? ' checked' : '');
@@ -1859,14 +1921,7 @@ if (empty($user['department']) || $user['department'] === null) {
         
         function saveCauseSelections() {
             const checkboxes = document.querySelectorAll('#causeModalBody input[type="checkbox"]:checked');
-            const selectedValues = Array.from(checkboxes).map(cb => cb.value);
-            
-            console.log('[v0] Saving selections for category:', currentCategory);
-            console.log('[v0] Selected values:', selectedValues);
-            
-            selections[currentCategory] = selectedValues;
-            
-            console.log('[v0] Updated selections object:', selections);
+            selections = Array.from(checkboxes).map(cb => cb.value);
             
             updateCauseCard(currentCategory);
             updateHiddenInputs();
@@ -1875,11 +1930,9 @@ if (empty($user['department']) || $user['department'] === null) {
         }
         
         function updateCauseCard(category) {
-            const count = selections[category].length;
+            const count = selections.length;
             const countElement = document.getElementById(category + 'Count');
             const cardElement = document.getElementById(category + 'Card');
-            
-            console.log('[v0] Updating card for category:', category, 'Count:', count);
             
             if (count > 0) {
                 countElement.textContent = count + ' selected';
@@ -1891,46 +1944,30 @@ if (empty($user['department']) || $user['department'] === null) {
         }
         
         function updateHiddenInputs() {
-            console.log('[v0] Updating hidden inputs with selections:', selections);
-            
-            document.getElementById('cause_people_hidden').value = JSON.stringify(selections.people);
-            document.getElementById('cause_process_hidden').value = JSON.stringify(selections.process);
-            document.getElementById('cause_it_systems_hidden').value = JSON.stringify(selections.itSystems);
-            document.getElementById('cause_external_hidden').value = JSON.stringify(selections.external);
-            
-            console.log('[v0] Hidden input values:');
-            console.log('[v0] People:', document.getElementById('cause_people_hidden').value);
-            console.log('[v0] Process:', document.getElementById('cause_process_hidden').value);
-            console.log('[v0] IT Systems:', document.getElementById('cause_it_systems_hidden').value);
-            console.log('[v0] External:', document.getElementById('cause_external_hidden').value);
+            document.getElementById('cause_people_hidden').value = activeCategory === 'people' ? JSON.stringify(selections) : '[]';
+            document.getElementById('cause_process_hidden').value = activeCategory === 'process' ? JSON.stringify(selections) : '[]';
+            document.getElementById('cause_it_systems_hidden').value = activeCategory === 'itSystems' ? JSON.stringify(selections) : '[]';
+            document.getElementById('cause_external_hidden').value = activeCategory === 'external' ? JSON.stringify(selections) : '[]';
         }
         
         function updateSelectionSummary() {
             const summaryDiv = document.getElementById('causeSelectionSummary');
             const summaryContent = document.getElementById('summaryContent');
             
-            let hasSelections = false;
-            let summaryHTML = '';
-            
-            const categoryMap = {
-                people: { title: 'People', icon: '👥' },
-                process: { title: 'Process', icon: '⚙️' },
-                itSystems: { title: 'IT Systems', icon: '💻' },
-                external: { title: 'External Environment', icon: '🌍' }
-            };
-            
-            for (const [key, value] of Object.entries(selections)) {
-                if (value.length > 0) {
-                    hasSelections = true;
-                    const category = categoryMap[key];
-                    summaryHTML += `<div style="margin-bottom: 10px;">
-                        <strong>${category.icon} ${category.title}:</strong><br>
-                        <span style="margin-left: 20px; color: #666;">${value.join(', ')}</span>
-                    </div>`;
-                }
-            }
-            
-            if (hasSelections) {
+            if (selections.length > 0 && activeCategory) {
+                const categoryMap = {
+                    people: { title: 'People', icon: '👥' },
+                    process: { title: 'Process', icon: '⚙️' },
+                    itSystems: { title: 'IT Systems', icon: '💻' },
+                    external: { title: 'External Environment', icon: '🌍' }
+                };
+                
+                const category = categoryMap[activeCategory];
+                const summaryHTML = `<div style="margin-bottom: 10px;">
+                    <strong>${category.icon} ${category.title}:</strong><br>
+                    <span style="margin-left: 20px; color: #666;">${selections.join(', ')}</span>
+                </div>`;
+                
                 summaryContent.innerHTML = summaryHTML;
                 summaryDiv.style.display = 'block';
             } else {
@@ -1938,7 +1975,6 @@ if (empty($user['department']) || $user['department'] === null) {
             }
         }
         
-        // Close cause modal when clicking outside
         window.addEventListener('click', function(event) {
             const causeModal = document.getElementById('causeModal');
             if (event.target === causeModal) {
@@ -1947,6 +1983,16 @@ if (empty($user['department']) || $user['department'] === null) {
         });
 
         document.addEventListener('DOMContentLoaded', function() {
+            const successNotification = document.getElementById('successNotification');
+            if (successNotification) {
+                setTimeout(function() {
+                    successNotification.classList.add('fade-out');
+                    setTimeout(function() {
+                        successNotification.style.display = 'none';
+                    }, 500);
+                }, 4000);
+            }
+
             const statsCard = document.getElementById('statsCard');
             const reportsSection = document.getElementById('reportsSection');
             if (reportsSection) {
@@ -1959,12 +2005,10 @@ if (empty($user['department']) || $user['department'] === null) {
                 });
             }
 
-            // Initialize cause card counts and hidden inputs on load
             for (const category in causeData) {
                 updateCauseCard(category);
                 updateHiddenInputs();
             }
-            // Initialize the summary display on load
             updateSelectionSummary();
         });
 
@@ -2025,8 +2069,11 @@ if (empty($user['department']) || $user['department'] === null) {
         function scrollToReports() {
             const reportsSection = document.getElementById('reportsSection');
             if (reportsSection) {
-                reportsSection.scrollIntoView({ behavior: 'smooth' });
-                toggleReports();
+                reportsSection.style.display = 'block';
+                reportsSection.classList.add('show');
+                setTimeout(function() {
+                    reportsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }, 100);
             }
         }
 
@@ -2051,8 +2098,12 @@ if (empty($user['department']) || $user['department'] === null) {
             }
         }
 
-        function viewRisk(id, categories, description, cause, createdAt, hasOwner, documentPath, documentFilename) {
-            let parsedCategories = JSON.parse(categories);
+        function viewRisk(risk) {
+            document.getElementById('modalRiskId').textContent = risk.risk_id || 'N/A';
+            
+            document.getElementById('modalRiskName').textContent = risk.risk_name || 'N/A';
+            
+            let parsedCategories = JSON.parse(risk.risk_categories);
             let categoryDisplay = '';
             if (Array.isArray(parsedCategories)) {
                 categoryDisplay = parsedCategories.join(', ');
@@ -2060,9 +2111,14 @@ if (empty($user['department']) || $user['department'] === null) {
                 categoryDisplay = parsedCategories;
             }
             document.getElementById('modalRiskCategory').textContent = categoryDisplay;
-            document.getElementById('modalRiskDescription').textContent = description;
             
-            let parsedCause = JSON.parse(cause);
+            document.getElementById('modalDateOccurrence').textContent = risk.date_of_occurrence || 'N/A';
+            
+            document.getElementById('modalDepartment').textContent = risk.department || 'N/A';
+            
+            document.getElementById('modalRiskDescription').textContent = risk.risk_description || 'N/A';
+            
+            let parsedCause = JSON.parse(risk.cause_of_risk);
             let causeDisplay = '';
             for (const category in parsedCause) {
                 if (parsedCause[category].length > 0) {
@@ -2070,14 +2126,33 @@ if (empty($user['department']) || $user['department'] === null) {
                 }
             }
             document.getElementById('modalCauseOfRisk').innerHTML = causeDisplay || 'N/A';
-
-            document.getElementById('modalDateSubmitted').textContent = createdAt;
-            document.getElementById('modalAssignmentStatus').textContent = hasOwner ? 'Assigned to Risk Owner' : 'Pending Assignment';
             
-            if (documentPath && documentPath !== '') {
+            document.getElementById('modalMoneyLoss').textContent = risk.involves_money_loss == 1 ? 'Yes' : 'No';
+            
+            if (risk.involves_money_loss == 1 && risk.money_range) {
+                document.getElementById('moneyRangeSection').style.display = 'block';
+                document.getElementById('modalMoneyRange').textContent = risk.money_range;
+            } else {
+                document.getElementById('moneyRangeSection').style.display = 'none';
+            }
+            
+            document.getElementById('modalGLPI').textContent = risk.reported_to_glpi == 1 ? 'Yes' : 'No';
+            
+            if (risk.reported_to_glpi == 1 && risk.glpi_ir_number) {
+                document.getElementById('glpiNumberSection').style.display = 'block';
+                document.getElementById('modalGLPINumber').textContent = risk.glpi_ir_number;
+            } else {
+                document.getElementById('glpiNumberSection').style.display = 'none';
+            }
+            
+            document.getElementById('modalDateSubmitted').textContent = risk.created_at || 'N/A';
+            
+            document.getElementById('modalAssignmentStatus').textContent = risk.risk_owner_id ? 'Assigned to Risk Owner' : 'Pending Assignment';
+            
+            if (risk.document_path && risk.document_path !== '') {
                 document.getElementById('documentSection').style.display = 'block';
-                document.getElementById('documentLink').href = documentPath;
-                document.getElementById('documentLink').textContent = documentFilename || 'View Document';
+                document.getElementById('documentLink').href = risk.document_path;
+                document.getElementById('documentLink').textContent = risk.document_filename || 'View Document';
             } else {
                 document.getElementById('documentSection').style.display = 'none';
             }
@@ -2090,7 +2165,6 @@ if (empty($user['department']) || $user['department'] === null) {
             alert('Chatbot feature coming soon!');
         }
 
-        // Close modals when clicking outside
         window.onclick = function(event) {
             const reportModal = document.getElementById('reportModal');
             const riskModal = document.getElementById('riskModal');
