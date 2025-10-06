@@ -21,6 +21,17 @@ $error = '';
 $database = new Database();
 $db = $database->getConnection();
 
+// Fetch departments from database
+$departments = [];
+try {
+    $dept_query = "SELECT id, department_name, initial FROM departments ORDER BY department_name ASC";
+    $dept_stmt = $db->prepare($dept_query);
+    $dept_stmt->execute();
+    $departments = $dept_stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    $error = "Failed to load departments. Please try again later.";
+}
+
 if ($_POST) {
     $email = $_POST['email'];
     $password = $_POST['password'];
@@ -330,17 +341,12 @@ if ($_POST) {
                 <label for="department">Department</label>
                 <select id="department" name="department" required>
                     <option value="">Select Department</option>
-                    <option value="Airtel Money" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Airtel Money') ? 'selected' : ''; ?>>Airtel Money</option>
-                    <option value="IT & Technology" <?php echo (isset($_POST['department']) && $_POST['department'] === 'IT & Technology') ? 'selected' : ''; ?>>IT & Technology</option>
-                    <option value="Finance" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Finance') ? 'selected' : ''; ?>>Finance</option>
-                    <option value="Operations" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Operations') ? 'selected' : ''; ?>>Operations</option>
-                    <option value="Risk & Compliance" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Risk & Compliance') ? 'selected' : ''; ?>>Risk & Compliance</option>
-                    <option value="Human Resources" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Human Resources') ? 'selected' : ''; ?>>Human Resources</option>
-                    <option value="Marketing" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Marketing') ? 'selected' : ''; ?>>Marketing</option>
-                    <option value="Customer Service" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Customer Service') ? 'selected' : ''; ?>>Customer Service</option>
-                    <option value="Network" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Network') ? 'selected' : ''; ?>>Network</option>
-                    <option value="Legal" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Legal') ? 'selected' : ''; ?>>Legal</option>
-                    <option value="Other" <?php echo (isset($_POST['department']) && $_POST['department'] === 'Other') ? 'selected' : ''; ?>>Other</option>
+                    <?php foreach ($departments as $dept): ?>
+                        <option value="<?php echo htmlspecialchars($dept['department_name']); ?>" 
+                                <?php echo (isset($_POST['department']) && $_POST['department'] === $dept['department_name']) ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($dept['department_name']); ?>
+                        </option>
+                    <?php endforeach; ?>
                 </select>
             </div>
             <div class="form-group">
@@ -364,7 +370,7 @@ if ($_POST) {
                     </label>
                 </div>
             </div>
-            <!-- Conditional fields based on role -->
+
             <div id="riskOwnerFields" style="display: none;">
                 <div class="form-group">
                     <label for="area_of_responsibility">Area of Responsibility</label>
@@ -390,7 +396,7 @@ if ($_POST) {
                     <label for="assigned_risk_owner_id">Assigned Risk Owner</label>
                     <select id="assigned_risk_owner_id" name="assigned_risk_owner_id">
                         <option value="">Select a Department first</option>
-                        <!-- Options will be loaded dynamically by JavaScript -->
+                         Options will be loaded dynamically by JavaScript 
                     </select>
                 </div>
             </div>

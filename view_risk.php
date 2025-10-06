@@ -63,6 +63,34 @@ if (!$risk) {
     exit();
 }
 
+$selected_categories = [];
+if (!empty($risk['risk_categories'])) {
+    $categories_data = json_decode($risk['risk_categories'], true);
+    if (is_array($categories_data)) {
+        // Flatten nested arrays and remove null values
+        $flattened_categories = [];
+        foreach ($categories_data as $category) {
+            if (is_array($category)) {
+                // Handle nested arrays like [["Compliance"]] or [["Financial Exposure","Other"]]
+                foreach ($category as $sub_category) {
+                    if (!is_null($sub_category) && !empty($sub_category)) {
+                        $flattened_categories[] = $sub_category;
+                    }
+                }
+            } else {
+                // Handle simple arrays like ["fraud"] or ["Financial Exposure"]
+                if (!is_null($category) && !empty($category)) {
+                    $flattened_categories[] = $category;
+                }
+            }
+        }
+        $selected_categories = array_unique($flattened_categories);
+    } else {
+        // Fallback for single category stored as string
+        $selected_categories = [$risk['risk_categories']];
+    }
+}
+
 // Check access permissions
 $has_access = false;
 $access_reason = '';
@@ -88,7 +116,14 @@ if (!$has_access) {
 // Check if current user can manage this risk (ONLY if assigned to them)
 $can_manage_risk = ($risk['risk_owner_id'] == $_SESSION['user_id']);
 
-// Get risk documents if they exist
+// Get risk attachments if they exist
+$attachments_query = "SELECT * FROM risk_attachments WHERE risk_id = :risk_id ORDER BY uploaded_at DESC";
+$attachments_stmt = $db->prepare($attachments_query);
+$attachments_stmt->bindParam(':risk_id', $risk_id);
+$attachments_stmt->execute();
+$attachments = $attachments_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get risk documents if they exist (keeping for other sections)
 $documents_query = "SELECT * FROM risk_documents WHERE risk_id = :risk_id ORDER BY section_type, uploaded_at DESC";
 $documents_stmt = $db->prepare($documents_query);
 $documents_stmt->bindParam(':risk_id', $risk_id);
@@ -176,6 +211,73 @@ function displayValue($value, $default = '-') {
 
 function displayDate($date, $format = 'M j, Y') {
     return !empty($date) ? date($format, strtotime($date)) : '-';
+}
+
+function getImpactDescription($category, $level) {
+    $impacts = [
+        'financial' => [
+            4 => 'Extreme: >5% of annual revenue',
+            3 => 'Significant: 1-5% of annual revenue', 
+            2 => 'Moderate: 0.25-1% of annual revenue',
+            1 => 'Minor: <0.25% of annual revenue'
+        ],
+        'market_share' => [
+            4 => 'Extreme: >10% market share loss',
+            3 => 'Significant: 5-10% market share loss',
+            2 => 'Moderate: 2-5% market share loss', 
+            1 => 'Minor: <2% market share loss'
+        ],
+        'customer' => [
+            4 => 'Extreme: >50% customer loss',
+            3 => 'Significant: 20-50% customer loss',
+            2 => 'Moderate: 5-20% customer loss',
+            1 => 'Minor: <5% customer loss'
+        ],
+        'compliance' => [
+            4 => 'Extreme: >$1M penalties',
+            3 => 'Significant: $0.5M-$1M penalties',
+            2 => 'Moderate: $0.1M-$0.5M penalties',
+            1 => 'Minor: <$0.1M penalties'
+        ],
+        'reputation' => [
+            4 => 'Extreme: National/international negative coverage',
+            3 => 'Significant: Regional negative coverage',
+            2 => 'Moderate: Local negative coverage',
+            1 => 'Minor: Limited negative coverage'
+        ],
+        'operations' => [
+            4 => 'Extreme: Complete shutdown >3 days',
+            3 => 'Significant: Major disruption 1-3 days',
+            2 => 'Moderate: Minor disruption <1 day',
+            1 => 'Minor: Limited disruption'
+        ],
+        'fraud' => [
+            4 => 'Extreme: >$1M fraud loss',
+            3 => 'Significant: $0.5M-$1M fraud loss',
+            2 => 'Moderate: $0.1M-$0.5M fraud loss',
+            1 => 'Minor: <$0.1M fraud loss'
+        ],
+        'technology' => [
+            4 => 'Extreme: Complete system failure >24hrs',
+            3 => 'Significant: Major system issues 8-24hrs',
+            2 => 'Moderate: Minor system issues 2-8hrs',
+            1 => 'Minor: Brief system issues <2hrs'
+        ],
+        'people' => [
+            4 => 'Extreme: >50% key staff turnover',
+            3 => 'Significant: 25-50% key staff turnover',
+            2 => 'Moderate: 10-25% key staff turnover',
+            1 => 'Minor: <10% key staff turnover'
+        ],
+        'other' => [
+            4 => 'Extreme: Severe impact',
+            3 => 'Significant: Major impact',
+            2 => 'Moderate: Moderate impact',
+            1 => 'Minor: Minor impact'
+        ]
+    ];
+    
+    return $impacts[$category][$level] ?? '-';
 }
 
 // Calculate risk age
@@ -1156,7 +1258,275 @@ if (!empty($risk['target_completion_date'])) {
                 left: -1.25rem;
             }
         }
+
+        /* Added styles for selected checkboxes and radio buttons */
+        .category-item {
+            margin-bottom: 0.5rem;
+        }
+        
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            cursor: not-allowed;
+            padding: 0.5rem;
+            border-radius: 0.25rem;
+            transition: background-color 0.3s;
+        }
+        
+        .checkbox-label input[type="checkbox"],
+        .checkbox-label input[type="radio"] {
+            margin-right: 0.5rem;
+            cursor: not-allowed;
+        }
+        
+        .checkmark.selected {
+            background-color: #E60012;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-weight: 500;
+        }
+        
+        .risk-categories-container {
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+            padding: 1rem;
+            background: #f8f9fa;
+        }
+
+        /* Styles for displaying selected categories and answers */
+        .selected-categories-display {
+            padding: 0.75rem;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+        }
+
+        .selected-category-item, .selected-answer-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 0.5rem;
+            color: #495057;
+            font-weight: 500;
+        }
+
+        .selected-category-item i, .selected-answer-item i {
+            margin-right: 0.5rem;
+            color: #28a745;
+        }
+
+        .no-data {
+            color: #6c757d;
+            font-style: italic;
+        }
+
+        .money-amount-display {
+            margin-top: 0.5rem;
+            padding: 0.5rem;
+            background: #fff3cd;
+            border-radius: 0.25rem;
+            border-left: 3px solid #ffc107;
+        }
+
+        .money-amount-display .form-label {
+            margin-bottom: 0.25rem;
+            font-size: 0.9rem;
+        }
+
+        .money-amount-display .amount-value {
+            font-weight: bold;
+            color: #856404;
+        }
+
+        .readonly-content {
+            padding: 0.75rem;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+            color: #495057;
+            white-space: pre-wrap;
+        }
+
+        /* Styles for Risk Assessment Section */
+        .risk-assessment-items {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .assessment-item {
+            padding: 1rem;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+        }
     </style>
+    <style>
+        .risk-rating-table {
+            width: 100%;
+            margin-top: 1rem;
+            border-collapse: collapse;
+        }
+
+        .risk-rating-table th,
+        .risk-rating-table td {
+            padding: 0.75rem;
+            text-align: left;
+            border: 1px solid #dee2e6;
+        }
+
+        .risk-rating-table th {
+            font-weight: bold;
+            background-color: #f8f9fa;
+        }
+
+        .risk-rating-table tbody tr:nth-child(odd) {
+            background-color: #f8f9fa;
+        }
+    </style>
+    <style>
+/* Added styles for risk rating table */
+.risk-rating-table {
+    margin-top: 15px;
+}
+
+.risk-rating-table table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+
+.risk-rating-table th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+    padding: 12px;
+    text-align: left;
+    border: 1px solid #dee2e6;
+}
+
+.risk-rating-table td {
+    padding: 10px 12px;
+    border: 1px solid #dee2e6;
+    vertical-align: top;
+}
+
+.risk-rating-table tr:nth-child(even) {
+    background-color: #f8f9fa;
+}
+
+.risk-rating-table tr:hover {
+    background-color: #e9ecef;
+}
+</style>
+<style>
+/* Styles for Risk Treatment Section */
+.treatments-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.5rem;
+    margin-top: 1rem;
+}
+
+.treatment-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    padding: 1.5rem;
+    border-top: 3px solid #E60012;
+}
+
+.treatment-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.treatment-title {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #333;
+    margin: 0;
+}
+
+.treatment-status {
+    padding: 0.4rem 0.8rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: white;
+}
+
+.status-open {
+    background: #28a745;
+}
+
+.status-in_progress {
+    background: #ffc107;
+    color: #212529;
+}
+
+.status-completed {
+    background: #17a2b8;
+}
+
+.status-on_hold {
+    background: #6c757d;
+}
+
+.treatment-meta {
+    margin-bottom: 1rem;
+}
+
+.meta-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.meta-label {
+    font-weight: 500;
+    color: #666;
+    margin-right: 0.5rem;
+    width: 100px;
+    flex-shrink: 0;
+}
+
+.meta-value {
+    color: #333;
+}
+
+.treatment-description {
+    margin-bottom: 1rem;
+}
+
+.treatment-description p {
+    margin: 0;
+    color: #444;
+    line-height: 1.5;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 2rem;
+    color: #666;
+}
+
+.empty-icon {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+    opacity: 0.5;
+}
+
+.empty-state h4 {
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+
+.empty-state p {
+    margin: 0;
+}
+</style>
 </head>
 <body>
     <!-- Header -->
@@ -1278,42 +1648,120 @@ if (!empty($risk['target_completion_date'])) {
                     <i class="fas fa-search"></i> Section 1: Risk Identification
                 </div>
                 
+                <!-- a. Risk Categories - Display from risk_categories column -->
                 <div class="form-group">
-                    <label class="form-label">Risk Name</label>
-                    <input type="text" class="form-control" value="<?php echo displayValue($risk['risk_name']); ?>" readonly>
+                    <label class="form-label">a. Risk Categories * <small>(Selected categories)</small></label>
+                    <div class="selected-categories-display">
+                        <?php if (!empty($selected_categories)): ?>
+                            <?php foreach ($selected_categories as $category): ?>
+                                <div class="selected-category-item">
+                                    <i class="fas fa-check-circle"></i>
+                                    <?php 
+                                    if (is_string($category)) {
+                                        // Display full category names
+                                        $category_names = [
+                                            'Financial Exposure' => 'Financial Exposure [Revenue, Operating Expenditure, Book value]',
+                                            'Decrease in market share' => 'Decrease in market share',
+                                            'Customer Experience' => 'Customer Experience',
+                                            'Compliance' => 'Compliance',
+                                            'Reputation' => 'Reputation',
+                                            'Fraud' => 'Fraud',
+                                            'Operations' => 'Operations (Business continuity)',
+                                            'Networks' => 'Networks',
+                                            'People' => 'People',
+                                            'IT' => 'IT (Cybersecurity & Data Privacy)',
+                                            'Other' => 'Other',
+                                            'fraud' => 'Fraud',
+                                            'compliance' => 'Compliance',
+                                            'reputation' => 'Reputation',
+                                            'operations' => 'Operations (Business continuity)'
+                                        ];
+                                        echo htmlspecialchars($category_names[$category] ?? $category);
+                                    }
+                                    ?>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <div class="no-data">No categories selected</div>
+                        <?php endif; ?>
+                    </div>
                 </div>
                 
+                <!-- b. Money loss question - Updated to check money_amount instead of involves_money_loss -->
                 <div class="form-group">
-                    <label class="form-label">Risk Description</label>
-                    <textarea class="form-control" readonly><?php echo displayValue($risk['risk_description']); ?></textarea>
+                    <label class="form-label">b. Does your risk involves loss of money? *</label>
+                    <div class="selected-answer-display">
+                        <?php 
+                        $money_amount = floatval($risk['money_amount'] ?? 0);
+                        if ($money_amount > 0): ?>
+                            <div class="selected-answer-item">
+                                <i class="fas fa-check-circle"></i>
+                                Yes
+                            </div>
+                            <div class="money-amount-display">
+                                <label class="form-label">Amount lost (in your local currency):</label>
+                                <div class="amount-value"><?php echo number_format($money_amount, 2); ?></div>
+                            </div>
+                        <?php else: ?>
+                            <div class="selected-answer-item">
+                                <i class="fas fa-times-circle"></i>
+                                No
+                            </div>
+                        <?php endif; ?>
+                    </div>
                 </div>
                 
+                <!-- c. Risk Description - Display from risk_description column -->
                 <div class="form-group">
-                    <label class="form-label">Cause of Risk</label>
-                    <textarea class="form-control" readonly><?php echo displayValue($risk['cause_of_risk']); ?></textarea>
+                    <label class="form-label">c. Risk Description *</label>
+                    <div class="readonly-content"><?php echo nl2br(htmlspecialchars(displayValue($risk['risk_description']))); ?></div>
                 </div>
                 
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label">Department</label>
-                        <input type="text" class="form-control" value="<?php echo displayValue($risk['department']); ?>" readonly>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">Risk Category</label>
-                        <input type="text" class="form-control" value="<?php echo displayValue($risk['risk_category']); ?>" readonly>
-                    </div>
+                <!-- d. Cause of Risk - Display from cause_of_risk column -->
+                <div class="form-group">
+                    <label class="form-label">d. Cause of Risk *</label>
+                    <div class="readonly-content"><?php echo nl2br(htmlspecialchars(displayValue($risk['cause_of_risk']))); ?></div>
                 </div>
                 
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label">Existing or New Risk</label>
-                        <input type="text" class="form-control" value="<?php echo displayValue($risk['existing_or_new']); ?>" readonly>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">Report to Board</label>
-                        <input type="text" class="form-control" value="<?php echo displayValue($risk['to_be_reported_to_board']); ?>" readonly>
+                <!-- e. Supporting documents - Using exact code provided by user -->
+                <div class="form-group">
+                    <label>Supporting Documents</label>
+                    <div class="readonly-display">
+                        <?php
+                        $doc_query = "SELECT original_filename, file_path, section_type, uploaded_at FROM risk_documents WHERE risk_id = ? ORDER BY uploaded_at DESC";
+                        $doc_stmt = $db->prepare($doc_query);
+                        $doc_stmt->execute([$risk_id]);
+                        $documents = $doc_stmt->fetchAll(PDO::FETCH_ASSOC);
+                        
+                        if (!empty($documents)):
+                        ?>
+                            <div style="background: white; border-radius: 8px; padding: 1rem; border: 1px solid #dee2e6;">
+                                <?php foreach ($documents as $doc): ?>
+                                    <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; margin-bottom: 0.5rem; background: #f8f9fa; border-radius: 6px; border-left: 4px solid #E60012;">
+                                        <div style="display: flex; align-items: center; gap: 0.75rem;">
+                                            <div style="width: 35px; height: 35px; background: #E60012; color: white; border-radius: 6px; display: flex; align-items: center; justify-content: center;">
+                                                <i class="fas fa-file-alt"></i>
+                                            </div>
+                                            <div>
+                                                <strong style="color: #333;"><?php echo htmlspecialchars($doc['original_filename']); ?></strong>
+                                                <br><small style="color: #666;">
+                                                    Uploaded: <?php echo date('M j, Y', strtotime($doc['uploaded_at'])); ?>
+                                                </small>
+                                            </div>
+                                        </div>
+                                        <a href="<?php echo htmlspecialchars($doc['file_path']); ?>" target="_blank" 
+                                           style="background: #E60012; color: white; padding: 0.5rem 1rem; border-radius: 6px; text-decoration: none; font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 0.5rem; transition: all 0.3s;">
+                                            <i class="fas fa-external-link-alt"></i> View
+                                        </a>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php else: ?>
+                            <div style="text-align: center; padding: 2rem; color: #666; font-style: italic;">
+                                <i class="fas fa-folder-open" style="font-size: 2rem; margin-bottom: 0.5rem; opacity: 0.5;"></i>
+                                <br>No supporting documents uploaded
+                            </div>
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -1350,125 +1798,197 @@ if (!empty($risk['target_completion_date'])) {
                     <i class="fas fa-calculator"></i> Section 2: Risk Assessment
                 </div>
                 
-                <div class="risk-matrix">
-                    <div class="matrix-section">
-                        <div class="matrix-title">Inherent Risk (Before Controls)</div>
-                        
-                        <div class="form-group">
-                            <label class="form-label">Likelihood (1-5)</label>
-                            <input type="text" class="form-control" value="<?php echo $risk['inherent_likelihood'] ? $risk['inherent_likelihood'] . ' - ' . ['', 'Rare', 'Unlikely', 'Possible', 'Likely', 'Almost Certain'][$risk['inherent_likelihood']] : '-'; ?>" readonly>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label class="form-label">Consequence (1-5)</label>
-                            <input type="text" class="form-control" value="<?php echo $risk['inherent_consequence'] ? $risk['inherent_consequence'] . ' - ' . ['', 'Insignificant', 'Minor', 'Moderate', 'Major', 'Catastrophic'][$risk['inherent_consequence']] : '-'; ?>" readonly>
-                        </div>
-                        
-                        <div class="rating-display <?php echo getRiskRatingClass($risk['inherent_likelihood'], $risk['inherent_consequence']); ?>">
-                            <?php echo getRiskRatingDisplay($risk['inherent_likelihood'], $risk['inherent_consequence']); ?>
-                        </div>
+                <!-- a. Existing or New Risk question -->
+                <div class="form-group">
+                    <label class="form-label">a. Existing or New Risk *</label>
+                    <div class="readonly-content">
+                        <?php 
+                        // Check if this is existing or new risk based on available data
+                        $risk_type = !empty($risk['id']) && !empty($risk['created_at']) ? 'Existing Risk' : 'New Risk';
+                        echo $risk_type;
+                        ?>
                     </div>
+                </div>
+
+                <!-- Updated Risk Assessment to Risk Rating with table format and risk names -->
+                <div class="form-group">
+                    <label class="form-label">b. Risk Rating</label>
                     
-                    <div class="matrix-section">
-                        <div class="matrix-title">Residual Risk (After Controls)</div>
-                        
-                        <div class="form-group">
-                            <label class="form-label">Likelihood (1-5)</label>
-                            <input type="text" class="form-control" value="<?php echo $risk['residual_likelihood'] ? $risk['residual_likelihood'] . ' - ' . ['', 'Rare', 'Unlikely', 'Possible', 'Likely', 'Almost Certain'][$risk['residual_likelihood']] : '-'; ?>" readonly>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label class="form-label">Consequence (1-5)</label>
-                            <input type="text" class="form-control" value="<?php echo $risk['residual_consequence'] ? $risk['residual_consequence'] . ' - ' . ['', 'Insignificant', 'Minor', 'Moderate', 'Major', 'Catastrophic'][$risk['residual_consequence']] : '-'; ?>" readonly>
-                        </div>
-                        
-                        <div class="rating-display <?php echo getRiskRatingClass($risk['residual_likelihood'], $risk['residual_consequence']); ?>">
-                            <?php echo getRiskRatingDisplay($risk['residual_likelihood'], $risk['residual_consequence']); ?>
-                        </div>
+                    <div class="risk-rating-table">
+                        <table class="table table-bordered">
+                            <thead>
+                                <tr>
+                                    <th>Risk Categories</th>
+                                    <th>Inherent Risk Rating</th>
+                                    <th>Residual Risk Rating</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php
+                                // Parse risk categories, ratings, and residual ratings
+                                $risk_categories = !empty($risk['risk_category']) ? json_decode($risk['risk_category'], true) : [];
+                                $risk_ratings = !empty($risk['risk_rating']) ? explode(',', $risk['risk_rating']) : [];
+                                $residual_ratings = !empty($risk['residual_rating']) ? explode(',', $risk['residual_rating']) : [];
+                                $inherent_levels = !empty($risk['inherent_risk_level']) ? explode(',', $risk['inherent_risk_level']) : [];
+                                $residual_levels = !empty($risk['residual_risk_level']) ? explode(',', $risk['residual_risk_level']) : [];
+                                
+                                // Get risk names from risk_name field (assuming comma-separated for multiple risks)
+                                $risk_names = !empty($risk['risk_name']) ? explode(',', $risk['risk_name']) : [];
+                                
+                                // Ensure we have at least one row to display
+                                $max_count = max(count($risk_categories), count($risk_ratings), count($residual_ratings), count($risk_names), 1);
+                                
+                                for ($i = 0; $i < $max_count; $i++) {
+                                    $roman_numeral = '';
+                                    switch($i) {
+                                        case 0: $roman_numeral = 'i.'; break;
+                                        case 1: $roman_numeral = 'ii.'; break;
+                                        case 2: $roman_numeral = 'iii.'; break;
+                                        case 3: $roman_numeral = 'iv.'; break;
+                                        case 4: $roman_numeral = 'v.'; break;
+                                        default: $roman_numeral = ($i + 1) . '.'; break;
+                                    }
+                                    
+                                    // Get risk name for this index
+                                    $risk_name = isset($risk_names[$i]) ? trim($risk_names[$i]) : (isset($risk_categories[$i]) ? $risk_categories[$i] : 'Risk ' . ($i + 1));
+                                    
+                                    $inherent_rating = isset($risk_ratings[$i]) ? trim($risk_ratings[$i]) : '-';
+                                    $residual_rating = isset($residual_ratings[$i]) ? trim($residual_ratings[$i]) : '-';
+                                    $inherent_level = isset($inherent_levels[$i]) ? trim($inherent_levels[$i]) : '';
+                                    $residual_level = isset($residual_levels[$i]) ? trim($residual_levels[$i]) : '';
+                                    
+                                    // Add risk level text to ratings if available
+                                    if (!empty($inherent_level) && $inherent_rating !== '-') {
+                                        $inherent_rating = $inherent_level . ' (' . $inherent_rating . ')';
+                                    }
+                                    if (!empty($residual_level) && $residual_rating !== '-') {
+                                        $residual_rating = $residual_level . ' (' . $residual_rating . ')';
+                                    }
+                                    
+                                    echo '<tr>';
+                                    echo '<td>' . $roman_numeral . ' ' . htmlspecialchars($risk_name) . '</td>';
+                                    echo '<td>' . htmlspecialchars($inherent_rating) . '</td>';
+                                    echo '<td>' . htmlspecialchars($residual_rating) . '</td>';
+                                    echo '</tr>';
+                                }
+                                ?>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
                 
-                <!-- Section 3: Risk Treatment -->
+                <!-- Changed from Impact Description to General Risk Score -->
+                <div class="form-group">
+                    <label class="form-label">c. GENERAL RISK SCORE</label>
+                    <div class="general-risk-scores">
+                        <div class="score-item">
+                            <label class="score-label">General Inherent Risk Score:</label>
+                            <div class="score-value">
+                                <?php 
+                                $general_inherent_score = $risk['general_inherent_risk_score'] ?? '-';
+                                $general_inherent_level = $risk['general_inherent_risk_level'] ?? '';
+                                
+                                if ($general_inherent_score !== '-' && !empty($general_inherent_level)) {
+                                    echo htmlspecialchars($general_inherent_level . ' (' . $general_inherent_score . ')');
+                                } else {
+                                    echo htmlspecialchars($general_inherent_score);
+                                }
+                                ?>
+                            </div>
+                        </div>
+                        
+                        <div class="score-item">
+                            <label class="score-label">General Residual Risk Score:</label>
+                            <div class="score-value">
+                                <?php 
+                                $general_residual_score = $risk['general_residual_risk_score'] ?? '-';
+                                $general_residual_level = $risk['general_residual_risk_level'] ?? '';
+                                
+                                if ($general_residual_score !== '-' && !empty($general_residual_level)) {
+                                    echo htmlspecialchars($general_residual_level . ' (' . $general_residual_score . ')');
+                                } else {
+                                    echo htmlspecialchars($general_residual_score);
+                                }
+                                ?>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Changed Section 3 from Risk Treatment to General Risk Status -->
                 <div class="section-header">
-                    <i class="fas fa-tools"></i> Section 3: Risk Treatment
-                </div>
-                
-                <div class="form-group">
-                    <label class="form-label">Treatment Action</label>
-                    <input type="text" class="form-control" value="<?php echo displayValue($risk['treatment_action']); ?>" readonly>
-                </div>
-                
-                <div class="form-group">
-                    <label class="form-label">Controls/Action Plans</label>
-                    <textarea class="form-control" readonly><?php echo displayValue($risk['controls_action_plans']); ?></textarea>
-                    
-                    <!-- Display Controls Documents -->
-                    <?php if (isset($grouped_documents['controls_action_plans'])): ?>
-                        <div class="file-list">
-                            <strong>Supporting Documents:</strong>
-                            <?php foreach ($grouped_documents['controls_action_plans'] as $doc): ?>
-                                <div class="file-item">
-                                    <div class="file-info">
-                                        <i class="fas fa-file"></i>
-                                        <span class="file-name"><?php echo htmlspecialchars($doc['original_filename']); ?></span>
-                                        <span class="file-size">(<?php echo number_format($doc['file_size'] / 1024, 1); ?> KB)</span>
-                                    </div>
-                                    <a href="<?php echo htmlspecialchars($doc['file_path']); ?>" target="_blank" class="btn btn-sm">
-                                        <i class="fas fa-download"></i> Download
-                                    </a>
-                                </div>
-                            <?php endforeach; ?>
-                        </div>
-                    <?php endif; ?>
-                </div>
-                
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label">Target Completion Date</label>
-                        <input type="text" class="form-control" value="<?php echo displayDate($risk['target_completion_date']); ?>" readonly>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">Treatment Status</label>
-                        <input type="text" class="form-control" value="<?php echo displayValue($risk['treatment_status']); ?>" readonly>
-                    </div>
-                </div>
-                
-                <!-- Section 4: Progress Update -->
-                <div class="section-header">
-                    <i class="fas fa-chart-line"></i> Section 4: Progress Update
-                </div>
-                
-                <div class="form-group">
-                    <label class="form-label">Progress Update</label>
-                    <textarea class="form-control" readonly><?php echo displayValue($risk['progress_update'], 'No updates yet'); ?></textarea>
-                    
-                    <!-- Display Progress Documents -->
-                    <?php if (isset($grouped_documents['progress_update'])): ?>
-                        <div class="file-list">
-                            <strong>Progress Documents:</strong>
-                            <?php foreach ($grouped_documents['progress_update'] as $doc): ?>
-                                <div class="file-item">
-                                    <div class="file-info">
-                                        <i class="fas fa-file"></i>
-                                        <span class="file-name"><?php echo htmlspecialchars($doc['original_filename']); ?></span>
-                                        <span class="file-size">(<?php echo number_format($doc['file_size'] / 1024, 1); ?> KB)</span>
-                                    </div>
-                                    <a href="<?php echo htmlspecialchars($doc['file_path']); ?>" target="_blank" class="btn btn-sm">
-                                        <i class="fas fa-download"></i> Download
-                                    </a>
-                                </div>
-                            <?php endforeach; ?>
-                        </div>
-                    <?php endif; ?>
+                    <i class="fas fa-info-circle"></i> SECTION 3: GENERAL RISK STATUS
                 </div>
                 
                 <div class="form-group">
                     <label class="form-label">Risk Status</label>
                     <input type="text" class="form-control" value="<?php echo displayValue($risk['risk_status'], 'Open'); ?>" readonly>
                 </div>
-            </div>
-        </div>
+                
+                <!-- Section 4: Risk Treatment Methods -->
+                <div class="section-header">
+                    <i class="fas fa-shield-alt"></i> Section 4: Risk Treatment Methods
+                </div>
+                
+                <?php
+                $treatments_query = "SELECT rt.*, u.full_name as assigned_user_name 
+                                   FROM risk_treatments rt 
+                                   LEFT JOIN users u ON rt.assigned_to = u.id 
+                                   WHERE rt.risk_id = :risk_id 
+                                   ORDER BY rt.created_at DESC";
+                $treatments_stmt = $db->prepare($treatments_query);
+                $treatments_stmt->bindParam(':risk_id', $risk_id);
+                $treatments_stmt->execute();
+                $treatments = $treatments_stmt->fetchAll(PDO::FETCH_ASSOC);
+                ?>
+                
+                <?php if (empty($treatments)): ?>
+                    <div class="empty-state">
+                        <div class="empty-icon">
+                            <i class="fas fa-shield-alt"></i>
+                        </div>
+                        <h4>No Treatment Methods Added</h4>
+                        <p>No risk treatment methods have been defined for this risk yet.</p>
+                    </div>
+                <?php else: ?>
+                    <div class="treatments-grid">
+                        <?php foreach ($treatments as $treatment): ?>
+                            <div class="treatment-card">
+                                <div class="treatment-header">
+                                    <h4 class="treatment-title"><?php echo htmlspecialchars($treatment['treatment_title']); ?></h4>
+                                    <span class="treatment-status status-<?php echo $treatment['status']; ?>">
+                                        <?php echo ucfirst(str_replace('_', ' ', $treatment['status'])); ?>
+                                    </span>
+                                </div>
+                                
+                                <div class="treatment-meta">
+                                    <div class="meta-item">
+                                        <span class="meta-label">Assigned To:</span>
+                                        <span class="meta-value"><?php echo htmlspecialchars($treatment['assigned_user_name'] ?: 'Unassigned'); ?></span>
+                                    </div>
+                                    
+                                    <?php if (!empty($treatment['target_completion_date'])): ?>
+                                        <div class="meta-item">
+                                            <span class="meta-label">Target Date:</span>
+                                            <span class="meta-value"><?php echo date('M j, Y', strtotime($treatment['target_completion_date'])); ?></span>
+                                        </div>
+                                    <?php endif; ?>
+                                    
+                                    <div class="meta-item">
+                                        <span class="meta-label">Created:</span>
+                                        <span class="meta-value"><?php echo date('M j, Y', strtotime($treatment['created_at'])); ?></span>
+                                    </div>
+                                </div>
+                                
+                                <div class="treatment-description">
+                                    <span class="meta-label">Description:</span>
+                                    <p><?php echo nl2br(htmlspecialchars($treatment['treatment_description'])); ?></p>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+               
 
         <!-- Risk History & Timeline -->
         <?php if (!empty($risk_history)): ?>

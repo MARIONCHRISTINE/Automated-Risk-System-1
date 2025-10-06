@@ -2,24 +2,39 @@
 include_once 'includes/auth.php';
 requireRole('risk_owner');
 include_once 'config/database.php';
-include_once 'includes/shared_notifications.php'; // Include shared notifications
-
+include_once 'includes/shared_notifications.php';
 // Verify session data exists
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['email'])) {
     header("Location: login.php");
     exit();
 }
-
 $database = new Database();
 $db = $database->getConnection();
-
+// First, let's check what columns actually exist in the risk_incidents table
+try {
+    $check_columns = "SHOW COLUMNS FROM risk_incidents LIKE 'department'";
+    $stmt = $db->prepare($check_columns);
+    $stmt->execute();
+    $has_department_column = $stmt->rowCount() > 0;
+    
+    $check_columns = "SHOW COLUMNS FROM risk_incidents LIKE 'normalized_department'";
+    $stmt = $db->prepare($check_columns);
+    $stmt->execute();
+    $has_normalized_department_column = $stmt->rowCount() > 0;
+    
+    // Determine which department column to use
+    $department_column = $has_normalized_department_column ? 'normalized_department' : 
+                         ($has_department_column ? 'department' : 'department_id');
+} catch (Exception $e) {
+    // Default to 'department' if we can't check
+    $department_column = 'department';
+}
 // Handle success message from risk edit
 if (isset($_GET['updated']) && isset($_GET['risk_id'])) {
     $updated_risk_id = (int)$_GET['risk_id'];
     $treatments_count = isset($_GET['treatments']) ? (int)$_GET['treatments'] : 0;
     $success_message = "✅ Risk updated successfully!";
 }
-
 // Handle risk assignment/unassignment
 if ($_POST && isset($_POST['action'])) {
     try {
@@ -36,142 +51,208 @@ if ($_POST && isset($_POST['action'])) {
         $error_message = "Error: " . $e->getMessage();
     }
 }
-
 // Handle accepting assignment
 if ($_POST && isset($_POST['accept_assignment'])) {
     $risk_id = $_POST['risk_id'];
-        // Update assignment status
+    // Update assignment status
     $query = "UPDATE risk_assignments SET status = 'Accepted' WHERE risk_id = :risk_id AND assigned_to = :user_id";
     $stmt = $db->prepare($query);
     $stmt->bindParam(':risk_id', $risk_id);
     $stmt->bindParam(':user_id', $_SESSION['user_id']);
-        if ($stmt->execute()) {
+    if ($stmt->execute()) {
         $success_message = "Risk assignment accepted successfully!";
     }
 }
-
 // Handle updating existing_or_new status (Risk Owner decision)
 if ($_POST && isset($_POST['update_risk_type'])) {
     $risk_id = $_POST['risk_id'];
     $existing_or_new = $_POST['existing_or_new'];
     $to_be_reported_to_board = $_POST['to_be_reported_to_board'];
-        $query = "UPDATE risk_incidents SET existing_or_new = :existing_or_new, to_be_reported_to_board = :to_be_reported_to_board WHERE id = :risk_id";
+    
+    $query = "UPDATE risk_incidents SET existing_or_new = :existing_or_new, to_be_reported_to_board = :to_be_reported_to_board, updated_at = NOW(), updated_by = :user_id WHERE id = :risk_id";
     $stmt = $db->prepare($query);
     $stmt->bindParam(':existing_or_new', $existing_or_new);
     $stmt->bindParam(':to_be_reported_to_board', $to_be_reported_to_board);
+    $stmt->bindParam(':user_id', $_SESSION['user_id']);
     $stmt->bindParam(':risk_id', $risk_id);
-        if ($stmt->execute()) {
+    
+    if ($stmt->execute()) {
         $success_message = "Risk classification updated successfully!";
     }
 }
-
 // Handle risk assessment update
 if ($_POST && isset($_POST['update_assessment'])) {
     $risk_id = $_POST['risk_id'];
     $probability = $_POST['probability'];
     $impact = $_POST['impact'];
-        // Calculate risk score
+    
+    // Calculate risk score
     $risk_rating = $probability * $impact;
-        // Determine risk level based on rating
+    
+    // Determine risk level based on rating
     $risk_level = 'Low';
     if ($risk_rating > 20) $risk_level = 'Critical';
     elseif ($risk_rating > 12) $risk_level = 'High';
     elseif ($risk_rating > 6) $risk_level = 'Medium';
-        $query = "UPDATE risk_incidents SET               probability = :probability,              impact = :impact,              risk_level = :risk_level              WHERE id = :risk_id";
-        $stmt = $db->prepare($query);
+    
+    $query = "UPDATE risk_incidents SET 
+              probability = :probability, 
+              impact = :impact, 
+              risk_level = :risk_level,
+              updated_at = NOW(),
+              updated_by = :user_id
+              WHERE id = :risk_id";
+    
+    $stmt = $db->prepare($query);
     $stmt->bindParam(':probability', $probability);
     $stmt->bindParam(':impact', $impact);
     $stmt->bindParam(':risk_level', $risk_level);
+    $stmt->bindParam(':user_id', $_SESSION['user_id']);
     $stmt->bindParam(':risk_id', $risk_id);
-        if ($stmt->execute()) {
+    
+    if ($stmt->execute()) {
         $success_message = "Risk assessment updated successfully!";
     }
 }
-
 // Get current user info
 $user = getCurrentUser();
-
 // Debug: Ensure department is available
 if (empty($user['department'])) {
     // Fallback: get department from session or database
     if (isset($_SESSION['department'])) {
         $user['department'] = $_SESSION['department'];
     } else {
-        // Get department from database
-        $dept_query = "SELECT department FROM users WHERE id = :user_id";
-        $dept_stmt = $db->prepare($dept_query);
-        $dept_stmt->bindParam(':user_id', $_SESSION['user_id']);
-        $dept_stmt->execute();
-        $dept_result = $dept_stmt->fetch(PDO::FETCH_ASSOC);
-        if ($dept_result) {
-            $user['department'] = $dept_result['department'];
+        // Get department from database - try different possible column names
+        try {
+            $dept_query = "SELECT department, normalized_department, department_name FROM users WHERE id = :user_id";
+            $dept_stmt = $db->prepare($dept_query);
+            $dept_stmt->bindParam(':user_id', $_SESSION['user_id']);
+            $dept_stmt->execute();
+            $dept_result = $dept_stmt->fetch(PDO::FETCH_ASSOC);
+            if ($dept_result) {
+                // Try different possible column names
+                $user['department'] = $dept_result['normalized_department'] ?? 
+                                     $dept_result['department'] ?? 
+                                     $dept_result['department_name'] ?? 
+                                     'Unknown Department';
+            }
+        } catch (Exception $e) {
+            $user['department'] = 'Unknown Department';
         }
     }
 }
-
 // Get comprehensive statistics
 $stats = [];
-// Risks in my department only
-$query = "SELECT COUNT(*) as total FROM risk_incidents WHERE department = :department";
-$stmt = $db->prepare($query);
-$stmt->bindParam(':department', $user['department']);
-$stmt->execute();
-$stats['department_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
-
+// Risks in my department only - use the department column we determined exists
+try {
+    $query = "SELECT COUNT(*) as total FROM risk_incidents WHERE $department_column = :department";
+    $stmt = $db->prepare($query);
+    $stmt->bindParam(':department', $user['department']);
+    $stmt->execute();
+    $stats['department_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
+} catch (Exception $e) {
+    $stats['department_risks'] = 0;
+}
 // Risks assigned to this risk owner
-$query = "SELECT COUNT(*) as total FROM risk_incidents WHERE risk_owner_id = :user_id";
-$stmt = $db->prepare($query);
-$stmt->bindParam(':user_id', $_SESSION['user_id']);
-$stmt->execute();
-$stats['my_assigned_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
-
+try {
+    $query = "SELECT COUNT(*) as total FROM risk_incidents WHERE risk_owner_id = :user_id";
+    $stmt = $db->prepare($query);
+    $stmt->bindParam(':user_id', $_SESSION['user_id']);
+    $stmt->execute();
+    $stats['my_assigned_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
+} catch (Exception $e) {
+    $stats['my_assigned_risks'] = 0;
+}
 // Risks reported by this risk owner
-$query = "SELECT COUNT(*) as total FROM risk_incidents WHERE reported_by = :user_id";
-$stmt = $db->prepare($query);
-$stmt->bindParam(':user_id', $_SESSION['user_id']);
-$stmt->execute();
-$stats['my_reported_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
-
-// High/Critical risks assigned to me
-$query = "SELECT COUNT(*) as total FROM risk_incidents           WHERE risk_owner_id = :user_id           AND ((inherent_likelihood IS NOT NULL AND inherent_consequence IS NOT NULL AND (inherent_likelihood * inherent_consequence) >= 9)        OR (residual_likelihood IS NOT NULL AND residual_consequence IS NOT NULL AND (residual_likelihood * residual_consequence) >= 9)        OR (probability IS NOT NULL AND impact IS NOT NULL AND (probability * impact) >= 9))";
-$stmt = $db->prepare($query);
-$stmt->bindParam(':user_id', $_SESSION['user_id']);
-$stmt->execute();
-$stats['my_high_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
-
+try {
+    $query = "SELECT COUNT(*) as total FROM risk_incidents WHERE reported_by = :user_id";
+    $stmt = $db->prepare($query);
+    $stmt->bindParam(':user_id', $_SESSION['user_id']);
+    $stmt->execute();
+    $stats['my_reported_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
+} catch (Exception $e) {
+    $stats['my_reported_risks'] = 0;
+}
+// High/Critical risks assigned to me - use risk_level field
+try {
+    $query = "SELECT COUNT(*) as total FROM risk_incidents 
+              WHERE risk_owner_id = :user_id 
+              AND risk_level IN ('High', 'Critical')";
+    $stmt = $db->prepare($query);
+    $stmt->bindParam(':user_id', $_SESSION['user_id']);
+    $stmt->execute();
+    $stats['my_high_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
+} catch (Exception $e) {
+    $stats['my_high_risks'] = 0;
+}
 // Get recently assigned risks (last 24 hours)
-$recent_query = "SELECT COUNT(*) as count FROM risk_incidents                  WHERE risk_owner_id = :user_id                  AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)";
-$recent_stmt = $db->prepare($recent_query);
-$recent_stmt->bindParam(':user_id', $_SESSION['user_id']);
-$recent_stmt->execute();
-$stats['recent_assignments'] = $recent_stmt->fetch(PDO::FETCH_ASSOC)['count'];
-
-// Get assigned risks (risks assigned to this user) - FIXED QUERY
-$query = "SELECT r.*, u.full_name as reporter_name         FROM risk_incidents r         LEFT JOIN users u ON r.reported_by = u.id         WHERE r.risk_owner_id = :user_id        ORDER BY r.created_at DESC";
-$stmt = $db->prepare($query);
-$stmt->bindParam(':user_id', $_SESSION['user_id']);
-$stmt->execute();
-$assigned_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-// Get department risks
-$query = "SELECT ri.*, u.full_name as reporter_name, ro.full_name as risk_owner_name         FROM risk_incidents ri         LEFT JOIN users u ON ri.reported_by = u.id        LEFT JOIN users ro ON ri.risk_owner_id = ro.id        WHERE ri.department = :department        ORDER BY             CASE               WHEN ri.inherent_likelihood IS NOT NULL AND ri.inherent_consequence IS NOT NULL              THEN (ri.inherent_likelihood * ri.inherent_consequence)            WHEN ri.residual_likelihood IS NOT NULL AND ri.residual_consequence IS NOT NULL              THEN (ri.residual_likelihood * residual_consequence)            WHEN ri.probability IS NOT NULL AND ri.impact IS NOT NULL              THEN (ri.probability * ri.impact)            ELSE 0             END DESC,          ri.created_at DESC";
-$stmt = $db->prepare($query);
-$stmt->bindParam(':department', $user['department']);
-$stmt->execute();
-$department_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
+try {
+    $recent_query = "SELECT COUNT(*) as count FROM risk_incidents 
+                     WHERE risk_owner_id = :user_id 
+                     AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)";
+    $recent_stmt = $db->prepare($recent_query);
+    $recent_stmt->bindParam(':user_id', $_SESSION['user_id']);
+    $recent_stmt->execute();
+    $stats['recent_assignments'] = $recent_stmt->fetch(PDO::FETCH_ASSOC)['count'];
+} catch (Exception $e) {
+    $stats['recent_assignments'] = 0;
+}
+// Get assigned risks (risks assigned to this user)
+try {
+    $query = "SELECT r.*, u.full_name as reporter_name 
+             FROM risk_incidents r 
+             LEFT JOIN users u ON r.reported_by = u.id 
+             WHERE r.risk_owner_id = :user_id
+             ORDER BY r.created_at DESC";
+    $stmt = $db->prepare($query);
+    $stmt->bindParam(':user_id', $_SESSION['user_id']);
+    $stmt->execute();
+    $assigned_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $assigned_risks = [];
+}
+// Get department risks - use the department column we determined exists
+try {
+    $query = "SELECT ri.*, u.full_name as reporter_name, ro.full_name as risk_owner_name 
+             FROM risk_incidents ri 
+             LEFT JOIN users u ON ri.reported_by = u.id
+             LEFT JOIN users ro ON ri.risk_owner_id = ro.id 
+             WHERE ri.$department_column = :department 
+             ORDER BY ri.created_at DESC";
+    $stmt = $db->prepare($query);
+    $stmt->bindParam(':department', $user['department']);
+    $stmt->execute();
+    $department_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $department_risks = [];
+}
 // Get risks reported by this user
-$query = "SELECT ri.*,                 ro.full_name as risk_owner_name,                reporter.full_name as reporter_name         FROM risk_incidents ri         LEFT JOIN users ro ON ri.risk_owner_id = ro.id        LEFT JOIN users reporter ON ri.reported_by = reporter.id        WHERE ri.reported_by = :user_id        ORDER BY ri.created_at DESC";
-$stmt = $db->prepare($query);
-$stmt->bindParam(':user_id', $_SESSION['user_id']);
-$stmt->execute();
-$my_reported_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
+try {
+    $query = "SELECT ri.*, 
+                     ro.full_name as risk_owner_name,
+                     reporter.full_name as reporter_name 
+             FROM risk_incidents ri 
+             LEFT JOIN users ro ON ri.risk_owner_id = ro.id
+             LEFT JOIN users reporter ON ri.reported_by = reporter.id 
+             WHERE ri.reported_by = :user_id 
+             ORDER BY ri.created_at DESC";
+    $stmt = $db->prepare($query);
+    $stmt->bindParam(':user_id', $_SESSION['user_id']);
+    $stmt->execute();
+    $my_reported_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $my_reported_risks = [];
+}
 // Get pending assignments (if you have a separate assignments table)
 $pending_assignments = []; // Initialize as empty array since we're not sure if this table exists
 // Try to get pending assignments, but handle if table doesn't exist
 try {
-    $pending_query = "SELECT r.*, u.full_name as reporter_name, ra.assignment_date                     FROM risk_assignments ra                    JOIN risk_incidents r ON ra.risk_id = r.id                    JOIN users u ON r.reported_by = u.id                    WHERE ra.assigned_to = :user_id AND ra.status = 'Pending'                    ORDER BY ra.assignment_date DESC";
+    $pending_query = "SELECT r.*, u.full_name as reporter_name, ra.assignment_date 
+                     FROM risk_assignments ra
+                     JOIN risk_incidents r ON ra.risk_id = r.id
+                     JOIN users u ON r.reported_by = u.id
+                     WHERE ra.assigned_to = :user_id AND ra.status = 'Pending'
+                     ORDER BY ra.assignment_date DESC";
     $pending_stmt = $db->prepare($pending_query);
     $pending_stmt->bindParam(':user_id', $_SESSION['user_id']);
     $pending_stmt->execute();
@@ -180,21 +261,46 @@ try {
     // Table might not exist, keep empty array
     $pending_assignments = [];
 }
-
-// Risk level distribution for department only
-$query = "SELECT     SUM(CASE         WHEN (probability IS NULL OR impact IS NULL)              AND (inherent_likelihood IS NULL OR inherent_consequence IS NULL)             AND (residual_likelihood IS NULL OR residual_consequence IS NULL)        THEN 1        WHEN (probability IS NOT NULL AND impact IS NOT NULL AND (probability * impact) <= 3)             OR (inherent_likelihood IS NOT NULL AND inherent_consequence IS NOT NULL AND (inherent_likelihood * inherent_consequence) <= 3)             OR (residual_likelihood IS NOT NULL AND residual_consequence IS NOT NULL AND (residual_likelihood * residual_consequence) <= 3)        THEN 1         ELSE 0     END) as low_risks,  SUM(CASE         WHEN (probability IS NOT NULL AND impact IS NOT NULL AND (probability * impact) BETWEEN 4 AND 8)             OR (inherent_likelihood IS NOT NULL AND inherent_consequence IS NOT NULL AND (inherent_likelihood * inherent_consequence) BETWEEN 4 AND 8)             OR (residual_likelihood IS NOT NULL AND residual_consequence IS NOT NULL AND (residual_likelihood * residual_consequence) BETWEEN 4 AND 8)        THEN 1 ELSE 0     END) as medium_risks,  SUM(CASE         WHEN (probability IS NOT NULL AND impact IS NOT NULL AND (probability * impact) BETWEEN 9 AND 14)             OR (inherent_likelihood IS NOT NULL AND inherent_consequence IS NOT NULL AND (inherent_likelihood * inherent_consequence) BETWEEN 9 AND 14)             OR (residual_likelihood IS NOT NULL AND residual_consequence IS NOT NULL AND (residual_likelihood * residual_consequence) BETWEEN 9 AND 14)        THEN 1 ELSE 0     END) as high_risks,  SUM(CASE         WHEN (probability IS NOT NULL AND impact IS NOT NULL AND (probability * impact) >= 15)             OR (inherent_likelihood IS NOT NULL AND inherent_consequence IS NOT NULL AND (inherent_likelihood * inherent_consequence) >= 15)             OR (residual_likelihood IS NOT NULL AND residual_consequence IS NOT NULL AND (residual_likelihood * residual_consequence) >= 15)        THEN 1 ELSE 0     END) as critical_risks  FROM risk_incidents    WHERE department = :department";
-$stmt = $db->prepare($query);
-$stmt->bindParam(':department', $user['department']);
-$stmt->execute();
-$risk_levels = $stmt->fetch(PDO::FETCH_ASSOC);
-
-// NEW: Risk category distribution for department with unique colors
-$category_query = "SELECT     risk_category,  COUNT(*) as count  FROM risk_incidents    WHERE department = :department  GROUP BY risk_category  ORDER BY count DESC";
-$category_stmt = $db->prepare($category_query);
-$category_stmt->bindParam(':department', $user['department']);
-$category_stmt->execute();
-$risk_by_category = $category_stmt->fetchAll(PDO::FETCH_ASSOC);
-
+// Risk level distribution for department only - use the department column we determined exists
+try {
+    $query = "SELECT 
+        SUM(CASE WHEN risk_level = 'Low' THEN 1 ELSE 0 END) as low_risks, 
+        SUM(CASE WHEN risk_level = 'Medium' THEN 1 ELSE 0 END) as medium_risks, 
+        SUM(CASE WHEN risk_level = 'High' THEN 1 ELSE 0 END) as high_risks, 
+        SUM(CASE WHEN risk_level = 'Critical' THEN 1 ELSE 0 END) as critical_risks,
+        SUM(CASE WHEN risk_level IS NULL OR risk_level = 'Not Assessed' THEN 1 ELSE 0 END) as not_assessed_risks
+        FROM risk_incidents 
+        WHERE $department_column = :department";
+    $stmt = $db->prepare($query);
+    $stmt->bindParam(':department', $user['department']);
+    $stmt->execute();
+    $risk_levels = $stmt->fetch(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    // Default values if query fails
+    $risk_levels = [
+        'low_risks' => 0,
+        'medium_risks' => 0,
+        'high_risks' => 0,
+        'critical_risks' => 0,
+        'not_assessed_risks' => 0
+    ];
+}
+// Risk category distribution for department with unique colors - use the department column we determined exists
+try {
+    $category_query = "SELECT 
+        risk_categories, 
+        COUNT(*) as count 
+        FROM risk_incidents 
+        WHERE $department_column = :department 
+        GROUP BY risk_categories 
+        ORDER BY count DESC";
+    $category_stmt = $db->prepare($category_query);
+    $category_stmt->bindParam(':department', $user['department']);
+    $category_stmt->execute();
+    $risk_by_category = $category_stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $risk_by_category = [];
+}
 // Generate unique colors for each category
 $category_colors = [
     '#E60012', // Airtel Red
@@ -210,9 +316,18 @@ $category_colors = [
     '#2F4F4F', // Dark Slate Gray
     '#B22222'  // Fire Brick
 ];
-
-// ENHANCED: Risk level calculation function that checks all possible fields
+// Helper function to clean category names by removing quotes and brackets
+function cleanCategoryName($name) {
+    return str_replace(['"', "'", '[', ']'], '', $name);
+}
+// Risk level calculation function that uses risk_level field first
 function getRiskLevel($risk) {
+    // First check if risk_level is set in the database
+    if (!empty($risk['risk_level']) && $risk['risk_level'] !== 'Not Assessed') {
+        return strtolower($risk['risk_level']);
+    }
+    
+    // If risk_level is not set or is 'Not Assessed', calculate from available fields
     // Check probability and impact first
     if (!empty($risk['probability']) && !empty($risk['impact'])) {
         $rating = (int)$risk['probability'] * (int)$risk['impact'];
@@ -228,13 +343,19 @@ function getRiskLevel($risk) {
     else {
         return 'not-assessed';
     }
-        if ($rating >= 15) return 'critical';
+    
+    if ($rating >= 15) return 'critical';
     if ($rating >= 9) return 'high';
     if ($rating >= 4) return 'medium';
     return 'low';
 }
-
 function getRiskLevelText($risk) {
+    // First check if risk_level is set in the database
+    if (!empty($risk['risk_level']) && $risk['risk_level'] !== 'Not Assessed') {
+        return $risk['risk_level'];
+    }
+    
+    // If risk_level is not set or is 'Not Assessed', calculate from available fields
     // Check probability and impact first
     if (!empty($risk['probability']) && !empty($risk['impact'])) {
         $rating = (int)$risk['probability'] * (int)$risk['impact'];
@@ -250,12 +371,12 @@ function getRiskLevelText($risk) {
     else {
         return 'Not Assessed';
     }
-        if ($rating >= 15) return 'Critical';
+    
+    if ($rating >= 15) return 'Critical';
     if ($rating >= 9) return 'High';
     if ($rating >= 4) return 'Medium';
     return 'Low';
 }
-
 function getStatusBadgeClass($status) {
     switch ($status) {
         case 'completed': return 'badge-success';
@@ -264,11 +385,11 @@ function getStatusBadgeClass($status) {
         default: return 'badge-secondary';
     }
 }
-
 // Function to get beautiful status display
 function getBeautifulStatus($status) {
     if (!$status) $status = 'pending';
-        switch(strtolower($status)) {
+    
+    switch(strtolower($status)) {
         case 'pending':
             return [
                 'text' => '🔓 Open',
@@ -307,28 +428,41 @@ function getBeautifulStatus($status) {
             ];
     }
 }
-
-// NEW: Calculate real values for the new tabs
-// Get department risks count
-$dept_risks_query = "SELECT COUNT(*) as total FROM risk_incidents WHERE department = :department";
-$dept_risks_stmt = $db->prepare($dept_risks_query);
-$dept_risks_stmt->bindParam(':department', $user['department']);
-$dept_risks_stmt->execute();
-$dept_risks_count = $dept_risks_stmt->fetch(PDO::FETCH_ASSOC)['total'];
-
+// Calculate real values for the new tabs
+// Get department risks count - use the department column we determined exists
+try {
+    $dept_risks_query = "SELECT COUNT(*) as total FROM risk_incidents WHERE $department_column = :department";
+    $dept_risks_stmt = $db->prepare($dept_risks_query);
+    $dept_risks_stmt->bindParam(':department', $user['department']);
+    $dept_risks_stmt->execute();
+    $dept_risks_count = $dept_risks_stmt->fetch(PDO::FETCH_ASSOC)['total'];
+} catch (Exception $e) {
+    $dept_risks_count = 0;
+}
 // Get assigned risks count (already have this as $stats['my_assigned_risks'])
 $assigned_risks_count = $stats['my_assigned_risks'];
-
-// FIXED: Get successfully managed risks count - only risks that have been properly assessed
-$managed_risks_query = "SELECT COUNT(*) as total FROM risk_incidents                        WHERE risk_owner_id = :user_id                        AND risk_status = 'completed'                       AND ((probability IS NOT NULL AND impact IS NOT NULL)                             OR (inherent_likelihood IS NOT NULL AND inherent_consequence IS NOT NULL)                            OR (residual_likelihood IS NOT NULL AND residual_consequence IS NOT NULL))";
-$managed_risks_stmt = $db->prepare($managed_risks_query);
-$managed_risks_stmt->bindParam(':user_id', $_SESSION['user_id']);
-$managed_risks_stmt->execute();
-$successfully_managed_count = $managed_risks_stmt->fetch(PDO::FETCH_ASSOC)['total'];
-
+// Get successfully managed risks count - only risks that have been properly assessed
+try {
+    $managed_risks_query = "SELECT COUNT(*) as total FROM risk_incidents 
+                             WHERE risk_owner_id = :user_id 
+                             AND risk_status = 'completed'
+                             AND risk_level IS NOT NULL
+                             AND risk_level != 'Not Assessed'";
+    $managed_risks_stmt = $db->prepare($managed_risks_query);
+    $managed_risks_stmt->bindParam(':user_id', $_SESSION['user_id']);
+    $managed_risks_stmt->execute();
+    $successfully_managed_count = $managed_risks_stmt->fetch(PDO::FETCH_ASSOC)['total'];
+} catch (Exception $e) {
+    $successfully_managed_count = 0;
+}
 // Get notifications using shared component
-$all_notifications = getNotifications($db, $_SESSION['user_id']);
-?><!DOCTYPE html>
+try {
+    $all_notifications = getNotifications($db, $_SESSION['user_id']);
+} catch (Exception $e) {
+    $all_notifications = [];
+}
+?>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -337,12 +471,14 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
+        /* All CSS styles remain the same as in the original code */
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-                body {
+        
+        body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #f5f5f5;
             color: #333;
@@ -350,10 +486,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             min-height: 100vh;
             padding-top: 150px;
         }
-                .dashboard {
+        
+        .dashboard {
             min-height: 100vh;
         }
-                .header {
+        
+        .header {
             background: #E60012;
             padding: 1.5rem 2rem;
             color: white;
@@ -463,7 +601,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             background: rgba(255, 255, 255, 0.3);
             border-color: rgba(255, 255, 255, 0.5);
         }
-                .nav {
+        
+        .nav {
             background: #f8f9fa;
             border-bottom: 1px solid #dee2e6;
             position: fixed;
@@ -521,18 +660,22 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
         .w-full {
             width: 100%;
         }
-                .main-content {
+        
+        .main-content {
             max-width: 1200px;
             margin: 0 auto;
             padding: 2rem;
         }
-                .tab-content {
+        
+        .tab-content {
             display: none;
         }
-                .tab-content.active {
+        
+        .tab-content.active {
             display: block;
         }
-                .card {
+        
+        .card {
             background: white;
             padding: 2rem;
             border-radius: 10px;
@@ -540,7 +683,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             margin-bottom: 2rem;
             border-top: 4px solid #E60012;
         }
-                .card h2 {
+        
+        .card h2 {
             color: #333;
             margin-bottom: 1.5rem;
             font-size: 1.5rem;
@@ -560,13 +704,15 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             font-weight: 600;
             margin: 0;
         }
-                .stats-grid, .dashboard-grid {
+        
+        .stats-grid, .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 1rem;
             margin-bottom: 2rem;
         }
-                .stat-card {
+        
+        .stat-card {
             background: white;
             padding: 1.5rem;
             border-radius: 10px;
@@ -574,13 +720,15 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             text-align: center;
             border-top: 4px solid #E60012;
         }
-                .stat-number {
+        
+        .stat-number {
             font-size: 2.5rem;
             font-weight: bold;
             margin-bottom: 0.5rem;
             color: #E60012;
         }
-                .stat-label {
+        
+        .stat-label {
             color: #666;
             font-size: 0.9rem;
             font-weight: 600;
@@ -590,19 +738,22 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             font-size: 0.8rem;
             margin-top: 0.25rem;
         }
-                .action-card:hover {
+        
+        .action-card:hover {
             transform: translateY(-5px);
             box-shadow: 0 8px 25px rgba(230, 0, 18, 0.2);
         }
         .action-card .stat-number {
             font-size: 3rem;
         }
-                .risk-grid {
+        
+        .risk-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
             gap: 2rem;
         }
-                .risk-card {
+        
+        .risk-card {
             border: 1px solid #ddd;
             border-radius: 8px;
             padding: 1.5rem;
@@ -611,41 +762,49 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             transition: transform 0.2s, box-shadow 0.2s;
         }
-                .risk-card:hover {
+        
+        .risk-card:hover {
             transform: translateY(-2px);
             box-shadow: 0 4px 15px rgba(0,0,0,0.15);
         }
-                .risk-header {
+        
+        .risk-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 1rem;
         }
-                .risk-header h3 {
+        
+        .risk-header h3 {
             color: #333;
             font-size: 1.2rem;
             font-weight: 600;
         }
-                .risk-level, .risk-badge {
+        
+        .risk-level, .risk-badge {
             padding: 0.25rem 0.75rem;
             border-radius: 15px;
             font-size: 0.8rem;
             font-weight: bold;
         }
-                .level-low, .risk-low { background: #d4edda; color: #155724; }
+        
+        .level-low, .risk-low { background: #d4edda; color: #155724; }
         .level-medium, .risk-medium { background: #fff3cd; color: #856404; }
         .level-high, .risk-high { background: #ffebee; color: #E60012; }
         .level-critical, .risk-critical { background: #ffcdd2; color: #E60012; }
         .level-not-assessed, .risk-not-assessed { background: #e2e3e5; color: #383d41; }
-                .risk-card p {
+        
+        .risk-card p {
             margin-bottom: 0.8rem;
             color: #666;
             line-height: 1.5;
         }
-                .risk-card strong {
+        
+        .risk-card strong {
             color: #333;
         }
-                .btn {
+        
+        .btn {
             background: #E60012;
             color: white;
             border: none;
@@ -659,29 +818,36 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             text-decoration: none;
             display: inline-block;
         }
-                .btn:hover {
+        
+        .btn:hover {
             background: #B8000E;
             transform: translateY(-1px);
             box-shadow: 0 4px 12px rgba(230, 0, 18, 0.3);
         }
-                .btn-secondary {
+        
+        .btn-secondary {
             background: #6c757d;
         }
-                .btn-secondary:hover {
+        
+        .btn-secondary:hover {
             background: #545b62;
             box-shadow: 0 4px 12px rgba(108, 117, 125, 0.3);
         }
-                .btn-success {
+        
+        .btn-success {
             background: #28a745;
         }
-                .btn-success:hover {
+        
+        .btn-success:hover {
             background: #218838;
         }
-                .btn-warning {
+        
+        .btn-warning {
             background: #ffc107;
             color: #212529;
         }
-                .btn-warning:hover {
+        
+        .btn-warning:hover {
             background: #e0a800;
         }
         .btn-outline {
@@ -703,7 +869,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
         .btn-primary:hover {
             background: #0056b3;
         }
-                .cta-button {
+        
+        .cta-button {
             display: inline-flex;
             align-items: center;
             gap: 0.5rem;
@@ -718,10 +885,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             border: none;
             cursor: pointer;
         }
-                .cta-button:hover {
+        
+        .cta-button:hover {
             background: #B8000E;
         }
-                .modal {
+        
+        .modal {
             display: none;
             position: fixed;
             z-index: 1000;
@@ -731,12 +900,14 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             height: 100%;
             background-color: rgba(0,0,0,0.5);
         }
-                .modal.show {
+        
+        .modal.show {
             display: flex;
             align-items: center;
             justify-content: center;
         }
-                .modal-content {
+        
+        .modal-content {
             background-color: white;
             margin: 5% auto;
             padding: 0;
@@ -748,7 +919,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             border-top: 4px solid #E60012;
             box-shadow: 0 4px 20px rgba(0,0,0,0.3);
         }
-                .modal-header {
+        
+        .modal-header {
             background: #E60012;
             color: white;
             padding: 1.5rem;
@@ -757,12 +929,14 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             align-items: center;
             border-radius: 10px 10px 0 0;
         }
-                .modal-title {
+        
+        .modal-title {
             font-size: 1.3rem;
             font-weight: 600;
             margin: 0;
         }
-                .close {
+        
+        .close {
             color: white;
             font-size: 28px;
             font-weight: bold;
@@ -770,27 +944,33 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             background: none;
             border: none;
         }
-                .close:hover {
+        
+        .close:hover {
             opacity: 0.7;
         }
-                .modal-body {
+        
+        .modal-body {
             padding: 2rem;
         }
-                .form-group {
+        
+        .form-group {
             margin-bottom: 1.5rem;
         }
-                .form-row {
+        
+        .form-row {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 1rem;
         }
-                label {
+        
+        label {
             display: block;
             margin-bottom: 0.5rem;
             font-weight: 500;
             color: #333;
         }
-                input, select, textarea {
+        
+        input, select, textarea {
             width: 100%;
             padding: 0.75rem;
             border: 2px solid #e1e5e9;
@@ -798,16 +978,19 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             transition: border-color 0.3s;
             font-size: 1rem;
         }
-                input:focus, select:focus, textarea:focus {
+        
+        input:focus, select:focus, textarea:focus {
             outline: none;
             border-color: #E60012;
             box-shadow: 0 0 0 3px rgba(230, 0, 18, 0.1);
         }
-                textarea {
+        
+        textarea {
             height: 100px;
             resize: vertical;
         }
-                .success, .alert-success {
+        
+        .success, .alert-success {
             background: #d4edda;
             color: #155724;
             padding: 1rem;
@@ -816,7 +999,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             border-left: 4px solid #28a745;
             font-weight: 500;
         }
-                .error, .alert-danger {
+        
+        .error, .alert-danger {
             background: #f8d7da;
             color: #721c24;
             padding: 1rem;
@@ -825,7 +1009,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             border-left: 4px solid #dc3545;
             font-weight: 500;
         }
-                .pending-badge {
+        
+        .pending-badge {
             background: #fff3cd;
             color: #856404;
             padding: 0.25rem 0.75rem;
@@ -833,18 +1018,21 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             font-size: 0.8rem;
             font-weight: bold;
         }
-                .classification-section {
+        
+        .classification-section {
             background: #fff5f5;
             padding: 1.5rem;
             border-radius: 8px;
             border-left: 4px solid #E60012;
             margin-bottom: 1rem;
         }
-                .classification-section h4 {
+        
+        .classification-section h4 {
             color: #E60012;
             margin-bottom: 1rem;
         }
-                .table-responsive {
+        
+        .table-responsive {
             overflow-x: auto;
         }
         .table {
@@ -873,7 +1061,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             position: relative;
             border-left: 4px solid transparent;
         }
-                .risk-row.critical { border-left-color: #dc3545; }
+        
+        .risk-row.critical { border-left-color: #dc3545; }
         .risk-row.high { border-left-color: #fd7e14; }
         .risk-row.medium { border-left-color: #ffc107; }
         .risk-row.low { border-left-color: #28a745; }
@@ -884,7 +1073,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             align-items: center;
             flex-wrap: wrap;
         }
-                .owner-badge {
+        
+        .owner-badge {
             background: #e3f2fd;
             color: #1565c0;
             padding: 0.25rem 0.5rem;
@@ -892,7 +1082,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             font-size: 0.8rem;
             font-weight: 500;
         }
-                .unassigned-badge {
+        
+        .unassigned-badge {
             background: #fff3e0;
             color: #ef6c00;
             padding: 0.25rem 0.5rem;
@@ -900,7 +1091,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             font-size: 0.8rem;
             font-weight: 500;
         }
-                .quick-assign-form {
+        
+        .quick-assign-form {
             display: inline-block;
             margin: 0;
         }
@@ -933,6 +1125,19 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
         .text-muted {
             color: #6c757d;
         }
+        
+        /* Custom Risk ID Badge */
+        .risk-id-badge {
+            display: inline-block;
+            background: #E60012;
+            color: white;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-right: 0.5rem;
+        }
+        
         /* Procedures Specific Styles */
         .procedure-section {
             margin: 2rem 0;
@@ -941,104 +1146,124 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             background: #f8f9fa;
             border-radius: 0 8px 8px 0;
         }
-                .procedure-title {
+        
+        .procedure-title {
             color: #E60012;
             font-size: 1.25rem;
             font-weight: 600;
             margin-bottom: 1rem;
         }
-                .field-definition {
+        
+        .field-definition {
             background: white;
             border: 1px solid #dee2e6;
             border-radius: 0.25rem;
             padding: 1rem;
             margin: 0.5rem 0;
         }
-                .field-name {
+        
+        .field-name {
             font-weight: 600;
             color: #E60012;
             margin-bottom: 0.5rem;
         }
-                .field-description {
+        
+        .field-description {
             color: #6c757d;
             font-size: 0.9rem;
         }
-                .risk-matrix-table {
+        
+        .risk-matrix-table {
             width: 100%;
             border-collapse: collapse;
             margin: 1rem 0;
         }
-                .risk-matrix-table th,
+        
+        .risk-matrix-table th,
         .risk-matrix-table td {
             border: 1px solid #dee2e6;
             padding: 0.75rem;
             text-align: center;
         }
-                .risk-matrix-table th {
+        
+        .risk-matrix-table th {
             background: #E60012;
             color: white;
         }
-                .matrix-1 { background: #d4edda; }
+        
+        .matrix-1 { background: #d4edda; }
         .matrix-2 { background: #fff3cd; }
         .matrix-3 { background: #f8d7da; }
         .matrix-4 { background: #f5c6cb; }
         .matrix-5 { background: #dc3545; color: white; }
-                .toc {
+        
+        .toc {
             background: #e9ecef;
             padding: 1.5rem;
             border-radius: 0.25rem;
             margin-bottom: 2rem;
         }
-                .toc ul {
+        
+        .toc ul {
             list-style: none;
             padding-left: 0;
         }
-                .toc li {
+        
+        .toc li {
             margin: 0.5rem 0;
         }
-                .toc a {
+        
+        .toc a {
             text-decoration: none;
             color: #E60012;
         }
-                .toc a:hover {
+        
+        .toc a:hover {
             text-decoration: underline;
         }
-                .department-grid {
+        
+        .department-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
             gap: 1rem;
             margin: 1rem 0;
         }
-                .department-card {
+        
+        .department-card {
             background: white;
             border: 1px solid #dee2e6;
             border-radius: 0.5rem;
             padding: 1rem;
             border-left: 4px solid #E60012;
         }
-                .department-title {
+        
+        .department-title {
             font-weight: 600;
             color: #E60012;
             margin-bottom: 0.5rem;
         }
-                .auto-assignment-flow {
+        
+        .auto-assignment-flow {
             background: #e3f2fd;
             border: 1px solid #2196f3;
             border-radius: 0.5rem;
             padding: 1rem;
             margin: 1rem 0;
         }
-                .flow-step {
+        
+        .flow-step {
             display: flex;
             align-items: center;
             margin: 0.5rem 0;
         }
-                .flow-step i {
+        
+        .flow-step i {
             color: #2196f3;
             margin-right: 0.5rem;
             width: 20px;
         }
-                /* Notification Styles */
+        
+        /* Notification Styles */
         .notification-nav-item {
             position: relative;
         }
@@ -1299,52 +1524,64 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
         .risk-tab-content.active {
             display: block;
         }
-                @media (max-width: 768px) {
+        
+        @media (max-width: 768px) {
             body {
                 padding-top: 200px;
             }
-                        .header {
+            
+            .header {
                 padding: 1.2rem 1.5rem;
             }
-                        .header-content {
+            
+            .header-content {
                 flex-direction: column;
                 gap: 1rem;
                 align-items: flex-start;
             }
-                        .header-right {
+            
+            .header-right {
                 align-self: flex-end;
             }
-                        .main-title {
+            
+            .main-title {
                 font-size: 1.3rem;
             }
-                        .sub-title {
+            
+            .sub-title {
                 font-size: 0.9rem;
             }
-                        .logout-btn {
+            
+            .logout-btn {
                 margin-left: 0;
                 margin-top: 0.5rem;
             }
-                        .nav {
+            
+            .nav {
                 top: 120px;
                 padding: 0.25rem 0;
             }
-                        .nav-content {
+            
+            .nav-content {
                 padding: 0 0.5rem;
                 overflow-x: auto;
                 -webkit-overflow-scrolling: touch;
             }
-                        .nav-menu {
+            
+            .nav-menu {
                 flex-wrap: nowrap;
                 justify-content: flex-start;
                 gap: 0;
                 min-width: max-content;
                 padding: 0 0.5rem;
             }
-                        .nav-item {
+            
+            .nav-item {
                 flex: 0 0 auto;
                 min-width: 80px;
             }
-                        .nav-item a {
+            
+            .nav-item a {
                 padding: 0.75rem 0.5rem;
                 font-size: 0.75rem;
                 text-align: center;
@@ -1359,60 +1596,75 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 justify-content: center;
                 gap: 0.25rem;
             }
-                        .nav-item a.active {
+            
+            .nav-item a.active {
                 border-bottom-color: #E60012;
                 border-left-color: transparent;
                 background-color: rgba(230, 0, 18, 0.1);
             }
-                        .nav-item a:hover {
+            
+            .nav-item a:hover {
                 background-color: rgba(230, 0, 18, 0.05);
             }
-                        .nav-notification-container {
+            
+            .nav-notification-container {
                 padding: 0.75rem 0.5rem;
                 font-size: 0.75rem;
                 min-width: 80px;
             }
-                        .nav-notification-text {
+            
+            .nav-notification-text {
                 font-size: 0.65rem;
             }
-                        .nav-notification-bell {
+            
+            .nav-notification-bell {
                 font-size: 1rem;
             }
-                        .nav-notification-badge {
+            
+            .nav-notification-badge {
                 width: 16px;
                 height: 16px;
                 font-size: 0.6rem;
             }
-                        .nav-notification-dropdown {
+            
+            .nav-notification-dropdown {
                 width: 95vw;
                 left: 2.5vw !important;
                 right: 2.5vw !important;
             }
-                        .modal-content {
+            
+            .modal-content {
                 width: 95%;
                 margin: 1rem;
             }
-                        .modal-body {
+            
+            .modal-body {
                 padding: 1.5rem;
             }
-                        .form-row {
+            
+            .form-row {
                 grid-template-columns: 1fr;
             }
-                        .assignment-actions {
+            
+            .assignment-actions {
                 flex-direction: column;
                 align-items: flex-start;
             }
-                        .dashboard-grid {
+            
+            .dashboard-grid {
                 grid-template-columns: 1fr;
                 gap: 1rem;
             }
-                        .stat-card {
+            
+            .stat-card {
                 padding: 1.5rem;
             }
-                        .stat-number {
+            
+            .stat-number {
                 font-size: 2rem;
             }
-                        .chart-container {
+            
+            .chart-container {
                 height: 250px;
             }
             .main-content {
@@ -1481,11 +1733,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 </div>
             </div>
         </header>
-                <nav class="nav">
+        
+        <nav class="nav">
             <div class="nav-content">
                 <ul class="nav-menu">
                     <li class="nav-item">
-                        <a href="risk_owner_dashboard.php" class="<?php echo !isset($_GET['tab']) ? 'active' : ''; ?>">
+                        <a href="javascript:void(0)" onclick="showTab('dashboard')" class="<?php echo !isset($_GET['tab']) ? 'active' : ''; ?>">
                             🏠 Dashboard
                         </a>
                     </li>
@@ -1495,12 +1748,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a href="risk_owner_dashboard.php?tab=my-reports" class="<?php echo isset($_GET['tab']) && $_GET['tab'] == 'my-reports' ? 'active' : ''; ?>">
+                        <a href="javascript:void(0)" onclick="showTab('my-reports')" class="<?php echo isset($_GET['tab']) && $_GET['tab'] == 'my-reports' ? 'active' : ''; ?>">
                             👀 My Reports
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a href="risk_owner_dashboard.php?tab=procedures" class="<?php echo isset($_GET['tab']) && $_GET['tab'] == 'procedures' ? 'active' : ''; ?>">
+                        <a href="javascript:void(0)" onclick="showTab('procedures')" class="<?php echo isset($_GET['tab']) && $_GET['tab'] == 'procedures' ? 'active' : ''; ?>">
                             📋 Procedures
                         </a>
                     </li>
@@ -1515,16 +1768,19 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 </ul>
             </div>
         </nav>
-                <main class="main-content">
+        
+        <main class="main-content">
             <?php if (isset($success_message)): ?>
                 <div class="success">✅ <?php echo $success_message; ?></div>
             <?php endif; ?>
-                        <?php if (isset($error_message)): ?>
+            
+            <?php if (isset($error_message)): ?>
                 <div class="error">❌ <?php echo $error_message; ?></div>
             <?php endif; ?>
-                        <!-- Dashboard Tab -->
+            
+            <!-- Dashboard Tab -->
             <div id="dashboard-tab" class="tab-content active">
-                                <!-- Risk Owner Statistics Cards -->
+                <!-- Risk Owner Statistics Cards -->
                 <div class="dashboard-grid">
                     <div class="stat-card" style="transition: transform 0.3s;">
                         <span class="stat-number"><?php echo $stats['department_risks']; ?></span>
@@ -1539,7 +1795,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     <div class="stat-card" style="transition: transform 0.3s;">
                         <span class="stat-number"><?php echo $stats['my_high_risks']; ?></span>
                         <div class="stat-label">High/Critical Risks</div>
-                        <div class="stat-description">High/Critical risks assigned to you</div>
+                        <div class="stat-description">High/Critical risks assessed by you</div>
                     </div>
                     <div class="stat-card" style="transition: transform 0.3s;">
                         <span class="stat-number"><?php echo $successfully_managed_count; ?></span>
@@ -1547,7 +1803,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                         <div class="stat-description">Risks you have completed with proper assessment</div>
                     </div>
                 </div>
-                                <!-- Charts Section -->
+                
+                <!-- Charts Section -->
                 <div class="dashboard-grid">
                     <!-- Risk Category Chart (UPDATED with unique colors) -->
                     <div class="card">
@@ -1556,7 +1813,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <canvas id="categoryChart"></canvas>
                         </div>
                     </div>
-                                        <!-- Risk Level Chart (EXISTING) -->
+                    
+                    <!-- Risk Level Chart (EXISTING) -->
                     <div class="card">
                         <h3 class="card-title">Risk Level Distribution</h3>
                         <div class="chart-container">
@@ -1564,16 +1822,18 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                         </div>
                     </div>
                 </div>
-                                <!-- Quick Actions -->
+                
+                <!-- Quick Actions -->
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">🚀 Quick Actions</h3>
                     </div>
-                                        <!-- Team Chat and AI Assistant Containers -->
+                    
+                    <!-- Team Chat and AI Assistant Containers -->
                     <div class="quick-actions-containers">
                         <!-- Team Chat -->
                         <div class="quick-action-container" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                            <a href="javascript:void(0)" onclick="openTeamChat()" style="text-decoration: none; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;">
+                            <a href="teamchat.php" style="text-decoration: none; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;">
                                 <div class="quick-action-icon">
                                     <i class="fas fa-comments" style="font-size: 2rem;"></i>
                                 </div>
@@ -1581,7 +1841,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 <div class="quick-action-description">Collaborate with your team</div>
                             </a>
                         </div>
-                                                <!-- AI Assistant -->
+                        
+                        <!-- AI Assistant -->
                         <div class="quick-action-container" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
                             <a href="javascript:void(0)" onclick="openChatBot()" style="text-decoration: none; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;">
                                 <div class="quick-action-icon">
@@ -1592,6 +1853,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             </a>
                         </div>
                     </div>
+                    
                     <!-- Risk Management Tabs -->
                     <div class="risk-management-tabs">
                         <div class="risk-tabs-nav">
@@ -1605,13 +1867,15 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 Risks Successfully Managed by You
                             </button>
                         </div>
-                                                <!-- Department Risks Overview Content -->
+                        
+                        <!-- Department Risks Overview Content -->
                         <div id="department-overview-content" class="risk-tab-content active">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                                 <h4 style="margin: 0; color: #333;">Department Risks Overview</h4>
                                 <span style="color: #E60012; font-weight: 600;"><?php echo $dept_risks_count; ?> risks in <?php echo $user['department']; ?></span>
                             </div>
-                                                        <?php if (empty($department_risks)): ?>
+                            
+                            <?php if (empty($department_risks)): ?>
                                 <div style="text-align: center; padding: 2rem; color: #666;">
                                     <div style="font-size: 2rem; margin-bottom: 1rem;">📋</div>
                                     <h4>No risks in your department yet</h4>
@@ -1622,6 +1886,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                     <table class="table">
                                         <thead>
                                             <tr>
+                                                <th>Risk ID</th>
                                                 <th>Risk Name</th>
                                                 <th>Category</th>
                                                 <th>Risk Level</th>
@@ -1635,8 +1900,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                             <?php foreach ($department_risks as $risk): ?>
                                             <tr style="border-left: 4px solid <?php
                                                  $level = getRiskLevel($risk);
-                                                echo $level == 'critical' ? '#dc3545' : ($level == 'high' ? '#fd7e14' : ($level == 'medium' ? '#ffc107' : '#28a745'));
+                                                echo $level == 'critical' ? '#dc3545' : ($level == 'high' ? '#fd7e14' : ($level == 'medium' ? '#ffc107' : ($level == 'low' ? '#28a745' : '#6c757d')));
                                             ?>;">
+                                                <td>
+                                                    <?php if (!empty($risk['custom_risk_id'])): ?>
+                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                                    <?php endif; ?>
+                                                </td>
                                                 <td>
                                                     <div style="font-weight: 600; color: #333;"><?php echo htmlspecialchars($risk['risk_name']); ?></div>
                                                     <?php if ($risk['risk_description']): ?>
@@ -1647,12 +1917,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                                 </td>
                                                 <td>
                                                     <span style="background: #f8f9fa; color: #495057; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.85rem;">
-                                                        <?php echo htmlspecialchars($risk['risk_category'] ?? 'Uncategorized'); ?>
+                                                        <?php echo htmlspecialchars(cleanCategoryName($risk['risk_categories'] ?? 'Uncategorized')); ?>
                                                     </span>
                                                 </td>
                                                 <td>
                                                     <?php
-                                                     $level = getRiskLevel($risk);
+                                                    $level = getRiskLevel($risk);
                                                     $levelText = getRiskLevelText($risk);
                                                     $levelColors = [
                                                         'critical' => ['bg' => '#f8d7da', 'color' => '#721c24'],
@@ -1701,13 +1971,15 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 </div>
                             <?php endif; ?>
                         </div>
-                                                <!-- Assigned Risks Content -->
+                        
+                        <!-- Assigned Risks Content -->
                         <div id="assigned-risks-content" class="risk-tab-content">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                                 <h4 style="margin: 0; color: #333;">My Assigned Risks</h4>
                                 <span style="color: #E60012; font-weight: 600;"><?php echo $assigned_risks_count; ?> risks assigned to you</span>
                             </div>
-                                                        <?php if (empty($assigned_risks)): ?>
+                            
+                            <?php if (empty($assigned_risks)): ?>
                                 <div style="text-align: center; padding: 2rem; color: #666;">
                                     <div style="font-size: 2rem; margin-bottom: 1rem;">📋</div>
                                     <h4>No risks assigned to you yet</h4>
@@ -1718,6 +1990,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                     <table class="table">
                                         <thead>
                                             <tr>
+                                                <th>Risk ID</th>
                                                 <th>Risk Name</th>
                                                 <th>Category</th>
                                                 <th>Risk Level</th>
@@ -1730,8 +2003,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                             <?php foreach ($assigned_risks as $risk): ?>
                                             <tr style="border-left: 4px solid <?php
                                                  $level = getRiskLevel($risk);
-                                                echo $level == 'critical' ? '#dc3545' : ($level == 'high' ? '#fd7e14' : ($level == 'medium' ? '#ffc107' : '#28a745'));
+                                                echo $level == 'critical' ? '#dc3545' : ($level == 'high' ? '#fd7e14' : ($level == 'medium' ? '#ffc107' : ($level == 'low' ? '#28a745' : '#6c757d')));
                                             ?>;">
+                                                <td>
+                                                    <?php if (!empty($risk['custom_risk_id'])): ?>
+                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                                    <?php endif; ?>
+                                                </td>
                                                 <td>
                                                     <div style="font-weight: 600; color: #333;"><?php echo htmlspecialchars($risk['risk_name']); ?></div>
                                                     <?php if ($risk['risk_description']): ?>
@@ -1742,12 +2020,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                                 </td>
                                                 <td>
                                                     <span style="background: #f8f9fa; color: #495057; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.85rem;">
-                                                        <?php echo htmlspecialchars($risk['risk_category'] ?? 'Uncategorized'); ?>
+                                                        <?php echo htmlspecialchars(cleanCategoryName($risk['risk_categories'] ?? 'Uncategorized')); ?>
                                                     </span>
                                                 </td>
                                                 <td>
                                                     <?php
-                                                     $level = getRiskLevel($risk);
+                                                    $level = getRiskLevel($risk);
                                                     $levelText = getRiskLevelText($risk);
                                                     $levelColors = [
                                                         'critical' => ['bg' => '#f8d7da', 'color' => '#721c24'],
@@ -1787,29 +2065,35 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 </div>
                             <?php endif; ?>
                         </div>
-                                                <!-- Successfully Managed Risks Content (UPDATED with proper assessment check) -->
+                        
+                        <!-- Successfully Managed Risks Content (UPDATED with proper assessment check) -->
                         <div id="successfully-managed-content" class="risk-tab-content">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                                 <h4 style="margin: 0; color: #333;">Risks Successfully Managed by You</h4>
                                 <span style="color: #E60012; font-weight: 600;"><?php echo $successfully_managed_count; ?> risks completed with proper assessment</span>
                             </div>
-                                                        <?php
+                            
+                            <?php
                             // Get successfully managed risks with proper assessment check
-                            $managed_risks_query = "SELECT ri.*, u.full_name as reporter_name
-                                                   FROM risk_incidents ri
-                                                   LEFT JOIN users u ON ri.reported_by = u.id
-                                                   WHERE ri.risk_owner_id = :user_id
-                                                    AND ri.risk_status = 'completed'
-                                                    AND ((ri.probability IS NOT NULL AND ri.impact IS NOT NULL)
-                                                          OR (ri.inherent_likelihood IS NOT NULL AND ri.inherent_consequence IS NOT NULL)
-                                                         OR (ri.residual_likelihood IS NOT NULL AND ri.residual_consequence IS NOT NULL))
-                                                   ORDER BY ri.updated_at DESC";
-                            $managed_risks_stmt = $db->prepare($managed_risks_query);
-                            $managed_risks_stmt->bindParam(':user_id', $_SESSION['user_id']);
-                            $managed_risks_stmt->execute();
-                            $successfully_managed_risks = $managed_risks_stmt->fetchAll(PDO::FETCH_ASSOC);
+                            try {
+                                $managed_risks_query = "SELECT ri.*, u.full_name as reporter_name
+                                                       FROM risk_incidents ri
+                                                       LEFT JOIN users u ON ri.reported_by = u.id
+                                                       WHERE ri.risk_owner_id = :user_id
+                                                        AND ri.risk_status = 'completed'
+                                                        AND ri.risk_level IS NOT NULL
+                                                        AND ri.risk_level != 'Not Assessed'
+                                                       ORDER BY ri.updated_at DESC";
+                                $managed_risks_stmt = $db->prepare($managed_risks_query);
+                                $managed_risks_stmt->bindParam(':user_id', $_SESSION['user_id']);
+                                $managed_risks_stmt->execute();
+                                $successfully_managed_risks = $managed_risks_stmt->fetchAll(PDO::FETCH_ASSOC);
+                            } catch (Exception $e) {
+                                $successfully_managed_risks = [];
+                            }
                             ?>
-                                                        <?php if (empty($successfully_managed_risks)): ?>
+                            
+                            <?php if (empty($successfully_managed_risks)): ?>
                                 <div style="text-align: center; padding: 2rem; color: #666;">
                                     <div style="font-size: 2rem; margin-bottom: 1rem;">🎯</div>
                                     <h4>No successfully managed risks yet</h4>
@@ -1823,6 +2107,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                     <table class="table">
                                         <thead>
                                             <tr>
+                                                <th>Risk ID</th>
                                                 <th>Risk Name</th>
                                                 <th>Category</th>
                                                 <th>Risk Level</th>
@@ -1835,6 +2120,11 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                             <?php foreach ($successfully_managed_risks as $risk): ?>
                                             <tr style="border-left: 4px solid #28a745;">
                                                 <td>
+                                                    <?php if (!empty($risk['custom_risk_id'])): ?>
+                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td>
                                                     <div style="font-weight: 600; color: #333;"><?php echo htmlspecialchars($risk['risk_name']); ?></div>
                                                     <?php if ($risk['risk_description']): ?>
                                                         <div style="font-size: 0.85rem; color: #666; margin-top: 0.25rem;">
@@ -1844,12 +2134,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                                 </td>
                                                 <td>
                                                     <span style="background: #f8f9fa; color: #495057; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.85rem;">
-                                                        <?php echo htmlspecialchars($risk['risk_category'] ?? 'Uncategorized'); ?>
+                                                        <?php echo htmlspecialchars(cleanCategoryName($risk['risk_categories'] ?? 'Uncategorized')); ?>
                                                     </span>
                                                 </td>
                                                 <td>
                                                     <?php
-                                                     $level = getRiskLevel($risk);
+                                                    $level = getRiskLevel($risk);
                                                     $levelText = getRiskLevelText($risk);
                                                     $levelColors = [
                                                         'critical' => ['bg' => '#f8d7da', 'color' => '#721c24'],
@@ -1883,7 +2173,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     </div>
                 </div>
             </div>
-                        <!-- My Assigned Risks Tab -->
+            
+            <!-- My Assigned Risks Tab -->
             <div id="risks-tab" class="tab-content">
                 <div class="card">
                     <div class="card-header">
@@ -1901,6 +2192,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                         <table class="table">
                             <thead>
                                 <tr>
+                                    <th>Risk ID</th>
                                     <th>Risk Name</th>
                                     <th>Risk Level</th>
                                     <th>Status</th>
@@ -1911,6 +2203,11 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <tbody>
                                 <?php foreach ($assigned_risks as $risk): ?>
                                 <tr class="risk-row <?php echo getRiskLevel($risk); ?>" data-risk-id="<?php echo $risk['id']; ?>">
+                                    <td>
+                                        <?php if (!empty($risk['custom_risk_id'])): ?>
+                                            <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                        <?php endif; ?>
+                                    </td>
                                     <td>
                                         <strong><?php echo htmlspecialchars($risk['risk_name']); ?></strong>
                                         <?php if ($risk['risk_description']): ?>
@@ -1944,7 +2241,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     <?php endif; ?>
                 </div>
             </div>
-                        <!-- Department Risks Tab -->
+            
+            <!-- Department Risks Tab -->
             <div id="department-tab" class="tab-content">
                 <div class="card">
                     <div class="card-header">
@@ -1961,6 +2259,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                         <table class="table">
                             <thead>
                                 <tr>
+                                    <th>Risk ID</th>
                                     <th>Risk Name</th>
                                     <th>Risk Level</th>
                                     <th>Status</th>
@@ -1972,6 +2271,11 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <tbody>
                                 <?php foreach ($department_risks as $risk): ?>
                                 <tr class="risk-row <?php echo getRiskLevel($risk); ?>" data-risk-id="<?php echo $risk['id']; ?>">
+                                    <td>
+                                        <?php if (!empty($risk['custom_risk_id'])): ?>
+                                            <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                        <?php endif; ?>
+                                    </td>
                                     <td>
                                         <strong><?php echo htmlspecialchars($risk['risk_name']); ?></strong>
                                         <?php if ($risk['risk_description']): ?>
@@ -2012,7 +2316,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     <?php endif; ?>
                 </div>
             </div>
-                        <!-- My Reports Tab -->
+            
+            <!-- My Reports Tab -->
             <div id="my-reports-tab" class="tab-content">
                 <!-- Statistics Cards -->
                 <div class="dashboard-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 2rem;">
@@ -2022,7 +2327,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     $open_reports = 0;
                     $in_progress_reports = 0;
                     $completed_reports = 0;
-                                        foreach ($my_reported_risks as $risk) {
+                    
+                    foreach ($my_reported_risks as $risk) {
                         switch ($risk['risk_status']) {
                             case 'pending':
                                 $open_reports++;
@@ -2036,34 +2342,40 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                         }
                     }
                     ?>
-                                        <div class="stat-card" style="border-left: 4px solid #E60012;">
+                    
+                    <div class="stat-card" style="border-left: 4px solid #E60012;">
                         <div class="stat-number" style="color: #E60012;"><?php echo $total_reports; ?></div>
                         <div class="stat-label" style="color: #8B4513; font-weight: 600;">Total Reports</div>
                         <div class="stat-description" style="color: #666;">All risks you have reported</div>
                     </div>
-                                        <div class="stat-card" style="border-left: 4px solid #E60012;">
+                    
+                    <div class="stat-card" style="border-left: 4px solid #E60012;">
                         <div class="stat-number" style="color: #E60012;"><?php echo $open_reports; ?></div>
                         <div class="stat-label" style="color: #8B4513; font-weight: 600;">Open</div>
                         <div class="stat-description" style="color: #666;">Awaiting review</div>
                     </div>
-                                        <div class="stat-card" style="border-left: 4px solid #E60012;">
+                    
+                    <div class="stat-card" style="border-left: 4px solid #E60012;">
                         <div class="stat-number" style="color: #E60012;"><?php echo $in_progress_reports; ?></div>
                         <div class="stat-label" style="color: #8B4513; font-weight: 600;">In Progress</div>
                         <div class="stat-description" style="color: #666;">Being addressed</div>
                     </div>
-                                        <div class="stat-card" style="border-left: 4px solid #E60012;">
+                    
+                    <div class="stat-card" style="border-left: 4px solid #E60012;">
                         <div class="stat-number" style="color: #E60012;"><?php echo $completed_reports; ?></div>
                         <div class="stat-label" style="color: #8B4513; font-weight: 600;">Completed</div>
                         <div class="stat-description" style="color: #666;">Successfully managed</div>
                     </div>
                 </div>
-                                <!-- Action Buttons and Search -->
+                
+                <!-- Action Buttons and Search -->
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem;">
                     <div>
                         <input type="text" id="searchRisks" placeholder="Search risks..." style="padding: 0.75rem; border: 1px solid #ddd; border-radius: 5px; width: 250px;">
                     </div>
                 </div>
-                                <!-- Reports Table -->
+                
+                <!-- Reports Table -->
                 <div class="card" style="padding: 0;">
                     <div style="padding: 1.5rem 2rem; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center;">
                         <h3 style="margin: 0; color: #333; font-size: 1.2rem; font-weight: 600;">All My Risk Reports</h3>
@@ -2075,7 +2387,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <option value="cancelled">Cancelled</option>
                         </select>
                     </div>
-                                        <?php if (empty($my_reported_risks)): ?>
+                    
+                    <?php if (empty($my_reported_risks)): ?>
                         <div style="padding: 3rem; text-align: center; color: #666;">
                             <div style="font-size: 3rem; margin-bottom: 1rem;">📋</div>
                             <h3 style="margin-bottom: 0.5rem;">No Risk Reports Yet</h3>
@@ -2089,6 +2402,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <table class="table" style="margin: 0;">
                                 <thead style="background: #f8f9fa;">
                                     <tr>
+                                        <th style="padding: 1rem; font-weight: 600; color: #495057;">Risk ID</th>
                                         <th style="padding: 1rem; font-weight: 600; color: #495057;">Risk Name</th>
                                         <th style="padding: 1rem; font-weight: 600; color: #495057;">Category</th>
                                         <th style="padding: 1rem; font-weight: 600; color: #495057;">Risk Level</th>
@@ -2101,8 +2415,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 </thead>
                                 <tbody id="reportsTableBody">
                                     <?php foreach ($my_reported_risks as $risk): ?>
-                                    <tr class="risk-report-row" data-status="<?php echo $risk['risk_status'] ?? 'pending'; ?>" data-search="<?php echo strtolower($risk['risk_name'] . ' ' . ($risk['risk_category'] ?? '')); ?>">
+                                    <tr class="risk-report-row" data-status="<?php echo $risk['risk_status'] ?? 'pending'; ?>" data-search="<?php echo strtolower($risk['risk_name'] . ' ' . cleanCategoryName($risk['risk_categories'] ?? '')); ?>">
                                         <td style="padding: 1rem; border-left: 4px solid #E60012;">
+                                            <?php if (!empty($risk['custom_risk_id'])): ?>
+                                                <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td style="padding: 1rem;">
                                             <div style="font-weight: 600; color: #333; margin-bottom: 0.25rem;">
                                                 <?php echo htmlspecialchars($risk['risk_name']); ?>
                                             </div>
@@ -2114,12 +2433,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                         </td>
                                         <td style="padding: 1rem;">
                                             <span style="background: #f8f9fa; color: #495057; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.85rem;">
-                                                <?php echo htmlspecialchars($risk['risk_category'] ?? 'Uncategorized'); ?>
+                                                <?php echo htmlspecialchars(cleanCategoryName($risk['risk_categories'] ?? 'Uncategorized')); ?>
                                             </span>
                                         </td>
                                         <td style="padding: 1rem;">
                                             <?php
-                                             $level = getRiskLevel($risk);
+                                            $level = getRiskLevel($risk);
                                             $levelText = getRiskLevelText($risk);
                                             $levelColors = [
                                                 'critical' => ['bg' => '#f8d7da', 'color' => '#721c24'],
@@ -2164,7 +2483,6 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                                 <a href="view_risk.php?id=<?php echo $risk['id']; ?>" style="background: #E60012; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; font-size: 0.8rem; cursor: pointer; text-decoration: none;">
                                                     View
                                                 </a>
-                                               
                                             </div>
                                         </td>
                                     </tr>
@@ -2175,14 +2493,16 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     <?php endif; ?>
                 </div>
             </div>
-                        <!-- Procedures Tab -->
+            
+            <!-- Procedures Tab -->
             <div id="procedures-tab" class="tab-content">
                 <div class="card">
                     <div class="card-header">
                         <h2 class="card-title">📋 Risk Management Procedures</h2>
                         <p style="margin: 0; color: #666;">Complete guide for risk owners in the Airtel Risk Management System</p>
                     </div>
-                                        <!-- Table of Contents -->
+                    
+                    <!-- Table of Contents -->
                     <div class="toc">
                         <h3>📑 Table of Contents</h3>
                         <ul>
@@ -2194,11 +2514,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <li><a href="#best-practices">6. Best Practices</a></li>
                         </ul>
                     </div>
-                                        <!-- Role Overview -->
+                    
+                    <!-- Role Overview -->
                     <div class="procedure-section" id="role-overview">
                         <h3 class="procedure-title">1. Risk Owner Role Overview</h3>
                         <p>As a Risk Owner in the Airtel Risk Management System, you are responsible for managing risks within your department and ensuring proper risk assessment and treatment.</p>
-                                                <h4>Key Responsibilities:</h4>
+                        
+                        <h4>Key Responsibilities:</h4>
                         <ul>
                             <li><strong>Risk Assessment:</strong> Evaluate and rate risks assigned to you</li>
                             <li><strong>Risk Treatment:</strong> Develop and implement risk mitigation strategies</li>
@@ -2207,11 +2529,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <li><strong>Status Updates:</strong> Keep risk statuses current and accurate</li>
                         </ul>
                     </div>
-                                        <!-- Risk Assessment Process -->
+                    
+                    <!-- Risk Assessment Process -->
                     <div class="procedure-section" id="risk-assessment">
                         <h3 class="procedure-title">2. Risk Assessment Process</h3>
                         <p>The risk assessment process involves evaluating both the likelihood and impact of identified risks.</p>
-                                                <h4>Assessment Fields:</h4>
+                        
+                        <h4>Assessment Fields:</h4>
                         <div class="field-definition">
                             <div class="field-name">Inherent Risk (Before Controls)</div>
                             <div class="field-description">
@@ -2219,14 +2543,16 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 <strong>Inherent Consequence:</strong> Impact if the risk occurs without controls (1-5 scale)
                             </div>
                         </div>
-                                                <div class="field-definition">
+                        
+                        <div class="field-definition">
                             <div class="field-name">Residual Risk (After Controls)</div>
                             <div class="field-description">
                                 <strong>Residual Likelihood:</strong> Probability after implementing controls (1-5 scale)<br>
                                 <strong>Residual Consequence:</strong> Impact after implementing controls (1-5 scale)
                             </div>
                         </div>
-                                                <div class="field-definition">
+                        
+                        <div class="field-definition">
                             <div class="field-name">Current Risk Assessment</div>
                             <div class="field-description">
                                 <strong>Probability:</strong> Current likelihood of occurrence (1-5 scale)<br>
@@ -2234,11 +2560,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             </div>
                         </div>
                     </div>
-                                        <!-- Risk Matrix -->
+                    
+                    <!-- Risk Matrix -->
                     <div class="procedure-section" id="risk-matrix">
                         <h3 class="procedure-title">3. Risk Assessment Matrix</h3>
                         <p>Use this matrix to determine risk levels based on likelihood and impact ratings:</p>
-                                                <table class="risk-matrix-table">
+                        
+                        <table class="risk-matrix-table">
                             <thead>
                                 <tr>
                                     <th>Impact →<br>Likelihood ↓</th>
@@ -2292,7 +2620,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 </tr>
                             </tbody>
                         </table>
-                                                <h4>Risk Level Definitions:</h4>
+                        
+                        <h4>Risk Level Definitions:</h4>
                         <ul>
                             <li><strong>Low (1-3):</strong> Acceptable risk, monitor regularly</li>
                             <li><strong>Medium (4-8):</strong> Manageable risk, implement controls</li>
@@ -2300,11 +2629,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <li><strong>Critical (15-25):</strong> Unacceptable risk, urgent action required</li>
                         </ul>
                     </div>
-                                        <!-- Department Management -->
+                    
+                    <!-- Department Management -->
                     <div class="procedure-section" id="department-management">
                         <h3 class="procedure-title">4. Department Risk Management</h3>
                         <p>As a risk owner, you have access to manage risks within your specific department:</p>
-                                                <div class="department-grid">
+                        
+                        <div class="department-grid">
                             <?php
                             $departments = [
                                 'IT' => 'Information Technology risks including cybersecurity, system failures, and data breaches',
@@ -2314,7 +2645,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 'Legal' => 'Legal and regulatory compliance risks',
                                 'Marketing' => 'Marketing and brand reputation risks'
                             ];
-                                                        foreach ($departments as $dept => $description) {
+                            
+                            foreach ($departments as $dept => $description) {
                                 if ($dept == $user['department']) {
                                     echo "<div class='department-card' style='border-left-color: #E60012; background: #fff5f5;'>";
                                     echo "<div class='department-title' style='color: #E60012;'>🏢 {$dept} (Your Department)</div>";
@@ -2325,7 +2657,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             }
                             ?>
                         </div>
-                                                <h4>Department Access Levels:</h4>
+                        
+                        <h4>Department Access Levels:</h4>
                         <ul>
                             <li><strong>View All Department Risks:</strong> See all risks reported within your department</li>
                             <li><strong>Take Ownership:</strong> Assign unowned risks to yourself</li>
@@ -2333,11 +2666,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <li><strong>Update Status:</strong> Change risk status and add progress notes</li>
                         </ul>
                     </div>
-                                        <!-- Auto Assignment -->
+                    
+                    <!-- Auto Assignment -->
                     <div class="procedure-section" id="auto-assignment">
                         <h3 class="procedure-title">5. Automatic Risk Assignment</h3>
                         <p>The system automatically assigns risks to appropriate risk owners based on department and expertise:</p>
-                                                <div class="auto-assignment-flow">
+                        
+                        <div class="auto-assignment-flow">
                             <h4>🔄 Auto-Assignment Process:</h4>
                             <div class="flow-step">
                                 <i class="fas fa-upload"></i>
@@ -2360,7 +2695,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                                 <span>Risk owner receives notification of new assignment</span>
                             </div>
                         </div>
-                                                <h4>Manual Override Options:</h4>
+                        
+                        <h4>Manual Override Options:</h4>
                         <ul>
                             <li><strong>Self-Assignment:</strong> Take ownership of unassigned risks in your department</li>
                             <li><strong>Transfer:</strong> Reassign risks to other qualified team members</li>
@@ -2368,10 +2704,12 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <li><strong>Regulatory Issues:</strong> Involve legal and compliance teams</li>
                         </ul>
                     </div>
-                                        <!-- Best Practices -->
+                    
+                    <!-- Best Practices -->
                     <div class="procedure-section" id="best-practices">
                         <h3 class="procedure-title">6. Best Practices</h3>
-                                                <h4>🎯 Risk Assessment Best Practices:</h4>
+                        
+                        <h4>🎯 Risk Assessment Best Practices:</h4>
                         <ul>
                             <li><strong>Be Objective:</strong> Base assessments on facts and data, not assumptions</li>
                             <li><strong>Consider Context:</strong> Evaluate risks within the current business environment</li>
@@ -2379,7 +2717,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <li><strong>Regular Reviews:</strong> Reassess risks periodically as conditions change</li>
                             <li><strong>Stakeholder Input:</strong> Consult with relevant team members and experts</li>
                         </ul>
-                                                <h4>📊 Risk Management Best Practices:</h4>
+                        
+                        <h4>📊 Risk Management Best Practices:</h4>
                         <ul>
                             <li><strong>Prioritize by Impact:</strong> Focus on high and critical risks first</li>
                             <li><strong>Develop Action Plans:</strong> Create specific, measurable mitigation strategies</li>
@@ -2387,7 +2726,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <li><strong>Communicate Effectively:</strong> Keep stakeholders informed of risk status</li>
                             <li><strong>Learn from Experience:</strong> Use past incidents to improve risk management</li>
                         </ul>
-                                                <h4>🚨 Escalation Guidelines:</h4>
+                        
+                        <h4>🚨 Escalation Guidelines:</h4>
                         <ul>
                             <li><strong>Critical Risks:</strong> Immediately escalate to senior management</li>
                             <li><strong>Cross-Department Risks:</strong> Coordinate with other department risk owners</li>
@@ -2399,7 +2739,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             </div>
         </main>
     </div>
-        <script>
+    <script>
         // Tab switching functionality
         function showTab(tabName) {
             // Hide all tab contents
@@ -2407,76 +2747,139 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             tabContents.forEach(content => {
                 content.classList.remove('active');
             });
-                        // Remove active class from all nav links
+            
+            // Remove active class from all nav links
             const navLinks = document.querySelectorAll('.nav-item a');
             navLinks.forEach(link => {
                 link.classList.remove('active');
             });
-                        // Show selected tab content
-            const selectedTab = document.getElementById(tabName + '-tab');
-            if (selectedTab) {
-                selectedTab.classList.add('active');
+            
+            // If tabName is invalid, fallback to dashboard
+            let selectedTab = document.getElementById(tabName + '-tab');
+            if (!selectedTab) {
+                tabName = 'dashboard';
+                selectedTab = document.getElementById('dashboard-tab');
             }
-                        // Add active class to clicked nav link
-            event.target.classList.add('active');
+            selectedTab.classList.add('active');
+            
+            // Find the nav link that corresponds to this tabName and set it active
+            navLinks.forEach(link => {
+                // Check if the link has an onclick that matches the tabName
+                if (link.getAttribute('onclick') && link.getAttribute('onclick').includes(`showTab('${tabName}')`)) {
+                    link.classList.add('active');
+                }
+                // For the Report Risk link, which is a direct href (only if tabName is 'report_risk')
+                else if (tabName === 'report_risk' && link.getAttribute('href') === 'report_risk.php') {
+                    link.classList.add('active');
+                }
+            });
+            
+            // Update URL without page reload
+            if (tabName !== 'dashboard') {
+                const newUrl = new URL(window.location);
+                newUrl.searchParams.set('tab', tabName);
+                window.history.pushState({}, '', newUrl);
+            } else {
+                const newUrl = new URL(window.location);
+                newUrl.searchParams.delete('tab');
+                window.history.pushState({}, '', newUrl);
+            }
         }
-                // Risk management tabs functionality
+        
+        // Risk management tabs functionality
         function showRiskTab(tabName) {
             // Hide all risk tab contents
             const riskTabContents = document.querySelectorAll('.risk-tab-content');
             riskTabContents.forEach(content => {
                 content.classList.remove('active');
             });
-                        // Remove active class from all risk tab buttons
+            
+            // Remove active class from all risk tab buttons
             const riskTabBtns = document.querySelectorAll('.risk-tab-btn');
             riskTabBtns.forEach(btn => {
                 btn.classList.remove('active');
             });
-                        // Show selected risk tab content
+            
+            // Show selected risk tab content
             const selectedRiskTab = document.getElementById(tabName + '-content');
             if (selectedRiskTab) {
                 selectedRiskTab.classList.add('active');
             }
-                        // Add active class to clicked risk tab button
+            
+            // Add active class to clicked risk tab button
             const clickedBtn = document.getElementById(tabName + '-tab');
             if (clickedBtn) {
                 clickedBtn.classList.add('active');
             }
         }
-                // Search and filter functionality for My Reports
+        
+        // Search and filter functionality for My Reports
         document.addEventListener('DOMContentLoaded', function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const tab = urlParams.get('tab');
+            
+            if (tab) {
+                showTab(tab);
+            } else {
+                // Ensure dashboard is shown by default
+                showTab('dashboard');
+            }
+            
             const searchInput = document.getElementById('searchRisks');
             const statusFilter = document.getElementById('statusFilter');
             const tableRows = document.querySelectorAll('.risk-report-row');
-                        function filterReports() {
-    const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
-    const selectedStatus = statusFilter ? statusFilter.value : '';
-        console.log('Filter - Selected Status:', selectedStatus); // Debug log
-        if (tableRows) {
-        let visibleCount = 0;
-        tableRows.forEach(row => {
-            const searchData = row.getAttribute('data-search') || '';
-            const rowStatus = row.getAttribute('data-status') || '';
-                        console.log('Row Status:', rowStatus, 'Search Data:', searchData); // Debug log
+            
+            function filterReports() {
+                const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+                const selectedStatus = statusFilter ? statusFilter.value : '';
+                
+                if (tableRows) {
+                    let visibleCount = 0;
+                    tableRows.forEach(row => {
+                        const searchData = row.getAttribute('data-search') || '';
+                        const rowStatus = row.getAttribute('data-status') || '';
+                        
                         const matchesSearch = searchData.includes(searchTerm);
-            const matchesStatus = !selectedStatus || rowStatus === selectedStatus;
+                        const matchesStatus = !selectedStatus || rowStatus === selectedStatus;
+                        
                         if (matchesSearch && matchesStatus) {
-                row.style.display = '';
-                visibleCount++;
-            } else {
-                row.style.display = 'none';
+                            row.style.display = '';
+                            visibleCount++;
+                        } else {
+                            row.style.display = 'none';
+                        }
+                    });
+                }
             }
-        });
-        console.log('Visible rows:', visibleCount); // Debug log
-    }}
-                        if (searchInput) {
+            
+            if (searchInput) {
                 searchInput.addEventListener('input', filterReports);
             }
-                        if (statusFilter) {
+            
+            if (statusFilter) {
                 statusFilter.addEventListener('change', filterReports);
             }
         });
-                // Chart initialization
+        
+        // Notification dropdown toggle
+        document.addEventListener('DOMContentLoaded', function() {
+            const notificationContainer = document.querySelector('.nav-notification-container');
+            const notificationDropdown = document.querySelector('.nav-notification-dropdown');
+            if (notificationContainer && notificationDropdown) {
+                notificationContainer.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    notificationDropdown.classList.toggle('show');
+                });
+                // Close the dropdown if clicked outside
+                document.addEventListener('click', function(e) {
+                    if (!notificationContainer.contains(e.target) && !notificationDropdown.contains(e.target)) {
+                        notificationDropdown.classList.remove('show');
+                    }
+                });
+            }
+        });
+        
+        // Chart initialization
         document.addEventListener('DOMContentLoaded', function() {
             // Risk Level Distribution Chart
             const levelCtx = document.getElementById('levelChart');
@@ -2484,15 +2887,16 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 new Chart(levelCtx, {
                     type: 'doughnut',
                     data: {
-                        labels: ['Low Risk', 'Medium Risk', 'High Risk', 'Critical Risk'],
+                        labels: ['Low Risk', 'Medium Risk', 'High Risk', 'Critical Risk', 'Not Assessed'],
                         datasets: [{
                             data: [
                                 <?php echo $risk_levels['low_risks']; ?>,
                                 <?php echo $risk_levels['medium_risks']; ?>,
                                 <?php echo $risk_levels['high_risks']; ?>,
-                                <?php echo $risk_levels['critical_risks']; ?>
+                                <?php echo $risk_levels['critical_risks']; ?>,
+                                <?php echo $risk_levels['not_assessed_risks']; ?>
                             ],
-                            backgroundColor: ['#28a745', '#ffc107', '#fd7e14', '#dc3545'],
+                            backgroundColor: ['#28a745', '#ffc107', '#fd7e14', '#dc3545', '#6c757d'],
                             borderWidth: 2,
                             borderColor: '#fff'
                         }]
@@ -2512,13 +2916,17 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     }
                 });
             }
-                        // Risk Category Distribution Chart (UPDATED with unique colors)
+            
+            // Risk Category Distribution Chart (UPDATED with unique colors)
             const categoryCtx = document.getElementById('categoryChart');
             if (categoryCtx) {
                 new Chart(categoryCtx, {
                     type: 'bar',
                     data: {
-                        labels: [<?php echo implode(',', array_map(function($cat) { return '"' . htmlspecialchars($cat['risk_category']) . '"'; }, $risk_by_category)); ?>],
+                        labels: [<?php echo implode(',', array_map(function($cat) { 
+                            $cleaned = cleanCategoryName($cat['risk_categories']);
+                            return '"' . htmlspecialchars($cleaned) . '"'; 
+                        }, $risk_by_category)); ?>],
                         datasets: [{
                             label: 'Number of Risks',
                             data: [<?php echo implode(',', array_column($risk_by_category, 'count')); ?>],
@@ -2554,52 +2962,15 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 });
             }
         });
-                // Functions for quick actions
+        
+        // Functions for quick actions
         function openTeamChat() {
-            window.location.href = "teamchat.php"
+            window.location.href = "teamchat.php";
         }
-               function openChatBot() {
+        
+        function openChatBot() {
             alert('AI Assistant feature coming soon! This will provide intelligent help with risk assessment and management procedures.');
         }
-// Handle URL parameters for tab switching
-document.addEventListener('DOMContentLoaded', function() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const tab = urlParams.get('tab');
-        if (tab) {
-        showTab(tab);
-                // Update active nav link
-        document.querySelectorAll('.nav-item a').forEach(link => {
-            link.classList.remove('active');
-        });
-                const activeLink = document.querySelector(`a[href*="tab=${tab}"]`);
-        if (activeLink) {
-            activeLink.classList.add('active');
-        }
-    }
-});
-// Update the showTab function to handle URL updates
-function showTab(tabName) {
-    // Hide all tab contents
-    const tabContents = document.querySelectorAll('.tab-content');
-    tabContents.forEach(content => {
-        content.classList.remove('active');
-    });
-        // Show selected tab content
-    const selectedTab = document.getElementById(tabName + '-tab');
-    if (selectedTab) {
-        selectedTab.classList.add('active');
-    }
-        // Update URL without page reload
-    if (tabName !== 'dashboard') {
-        const newUrl = new URL(window.location);
-        newUrl.searchParams.set('tab', tabName);
-        window.history.pushState({}, '', newUrl);
-    } else {
-        const newUrl = new URL(window.location);
-        newUrl.searchParams.delete('tab');
-        window.history.pushState({}, '', newUrl);
-    }
-}
     </script>
 </body>
 </html>

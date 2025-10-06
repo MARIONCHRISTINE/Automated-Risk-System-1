@@ -2,214 +2,336 @@
 include_once 'includes/auth.php';
 requireRole('staff');
 include_once 'config/database.php';
-include_once 'includes/auto_assignment.php'; // Ensure this is included
+include_once 'includes/auto_assignment.php';
 
 $database = new Database();
 $db = $database->getConnection();
 
-if (isset($_POST['submit_risk'])) {
-    $risk_categories = isset($_POST['risk_categories']) ? $_POST['risk_categories'] : [];
-    $category_details = [];
-    
-    // Process category details
-    foreach ($risk_categories as $category) {
-        $field_name = 'category_details[' . $category . ']';
-        if (isset($_POST['category_details'][$category]) && !empty($_POST['category_details'][$category])) {
-            $category_details[$category] = $_POST['category_details'][$category];
-        }
-    }
-    
-    // Store JSON-encoded strings in variables before binding
-    $risk_categories_json = json_encode($risk_categories);
-    $category_details_json = json_encode($category_details);
-    
-    $involves_money_loss = isset($_POST['involves_money_loss']) ? $_POST['involves_money_loss'] == 'Yes' ? 1 : 0 : 0;
-    $money_amount = isset($_POST['money_amount']) ? $_POST['money_amount'] : '0.00';
-    $risk_description = $_POST['risk_description'];
-    $cause_of_risk = $_POST['cause_of_risk'];
-    $user_id = $_SESSION['user_id'];
-    
-    $user = getCurrentUser();
-    if (empty($user['department']) || $user['department'] === null) {
-        $dept_query = "SELECT department FROM users WHERE id = :user_id";
+/**
+ * Generate a unique Risk ID based on department, date, and sequential number
+ * Format: DEPT_INITIAL/YYYY/MM/SEQUENTIAL_NUMBER
+ */
+function generateRiskId($db, $department) {
+    try {
+        // Get department initial from departments table
+        $dept_query = "SELECT initial FROM departments WHERE department_name = :department LIMIT 1";
         $dept_stmt = $db->prepare($dept_query);
-        $dept_stmt->bindParam(':user_id', $user_id);
+        $dept_stmt->bindParam(':department', $department);
         $dept_stmt->execute();
+        
         $dept_result = $dept_stmt->fetch(PDO::FETCH_ASSOC);
-        if ($dept_result && !empty($dept_result['department'])) {
-            $user['department'] = $dept_result['department'];
-            $_SESSION['department'] = $dept_result['department'];
+        
+        if (!$dept_result) {
+            throw new Exception("Department not found: " . $department);
         }
+        
+        $dept_initial = $dept_result['initial'];
+        
+        // Get current year and month
+        $year = date('Y');
+        $month = date('m');
+        
+        // Count existing risks for this department in current month
+        $count_query = "SELECT COUNT(*) as count FROM risk_incidents 
+                       WHERE department = :department 
+                       AND YEAR(created_at) = :year 
+                       AND MONTH(created_at) = :month";
+        
+        $count_stmt = $db->prepare($count_query);
+        $count_stmt->bindParam(':department', $department);
+        $count_stmt->bindParam(':year', $year);
+        $count_stmt->bindParam(':month', $month);
+        $count_stmt->execute();
+        
+        $count_result = $stmt->fetch(PDO::FETCH_ASSOC); // This line has a typo, it should be $count_stmt
+        $sequential_number = $count_result['count'] + 1;
+        
+        // Generate the risk ID
+        $risk_id = $dept_initial . '/' . $year . '/' . $month . '/' . $sequential_number;
+        
+        return $risk_id;
+        
+    } catch (Exception $e) {
+        error_log("Error generating Risk ID: " . $e->getMessage());
+        return null;
     }
-    $department = $user['department'] ?? 'General';
+}
 
-    // Handle file upload (optional)
-    $uploaded_file_path = null;
-    if (isset($_FILES['risk_document']) && $_FILES['risk_document']['error'] === UPLOAD_ERR_OK) {
+if (isset($_POST['submit_risk'])) {
+    try {
+        // Process risk categories - single selection from radio button
+        $risk_categories = isset($_POST['risk_categories']) ? [$_POST['risk_categories']] : [];
+        
+        // Process date of occurrence
+        $date_of_occurrence = isset($_POST['date_of_occurrence']) ? $_POST['date_of_occurrence'] : null;
+        
+        $cause_of_risk_data = [];
+        if (isset($_POST['cause_people_hidden']) && !empty($_POST['cause_people_hidden'])) {
+            $people_data = json_decode($_POST['cause_people_hidden'], true);
+            if (is_array($people_data) && count($people_data) > 0) {
+                $cause_of_risk_data['People'] = $people_data;
+            }
+        }
+        if (isset($_POST['cause_process_hidden']) && !empty($_POST['cause_process_hidden'])) {
+            $process_data = json_decode($_POST['cause_process_hidden'], true);
+            if (is_array($process_data) && count($process_data) > 0) {
+                $cause_of_risk_data['Process'] = $process_data;
+            }
+        }
+        if (isset($_POST['cause_it_systems_hidden']) && !empty($_POST['cause_it_systems_hidden'])) {
+            $it_data = json_decode($_POST['cause_it_systems_hidden'], true);
+            if (is_array($it_data) && count($it_data) > 0) {
+                $cause_of_risk_data['IT Systems'] = $it_data;
+            }
+        }
+        if (isset($_POST['cause_external_hidden']) && !empty($_POST['cause_external_hidden'])) {
+            $external_data = json_decode($_POST['cause_external_hidden'], true);
+            if (is_array($external_data) && count($external_data) > 0) {
+                $cause_of_risk_data['External Environment'] = $external_data;
+            }
+        }
+        $cause_of_risk_json = json_encode($cause_of_risk_data);
+        
+        // Process money loss data with ranges
+        $involves_money_loss = isset($_POST['involves_money_loss']) ? ($_POST['involves_money_loss'] == 'yes' ? 1 : 0) : 0;
+        $money_range = ($involves_money_loss && isset($_POST['money_range']) && !empty($_POST['money_range'])) ? 
+                       $_POST['money_range'] : null;
+        
+        // Process GLPI reporting
+        $reported_to_glpi = isset($_POST['reported_to_glpi']) ? ($_POST['reported_to_glpi'] == 'yes' ? 1 : 0) : 0;
+        $glpi_ir_number = ($reported_to_glpi && isset($_POST['glpi_ir_number']) && !empty($_POST['glpi_ir_number'])) ? 
+                          trim($_POST['glpi_ir_number']) : null;
+        
+        // Get risk description
+        $risk_description = trim($_POST['risk_description']);
+        
+        // Generate risk name
+        $primary_category = $risk_categories[0] ?? 'General';
+        $description_preview = strlen($risk_description) > 50 ? 
+                              substr($risk_description, 0, 50) . '...' : $risk_description;
+        $risk_name = $primary_category . ' - ' . $description_preview;
+        
+        // Get user information
+        $user_id = $_SESSION['user_id'];
+        $user = getCurrentUser();
+        
+        // Ensure department is available
+        if (empty($user['department']) || $user['department'] === null) {
+            $dept_query = "SELECT department FROM users WHERE id = :user_id";
+            $dept_stmt = $db->prepare($dept_query);
+            $dept_stmt->bindParam(':user_id', $user_id);
+            $dept_stmt->execute();
+            $dept_result = $dept_stmt->fetch(PDO::FETCH_ASSOC);
+            if ($dept_result && !empty($dept_result['department'])) {
+                $user['department'] = $dept_result['department'];
+                $_SESSION['department'] = $dept_result['department'];
+            }
+        }
+        $department = $user['department'] ?? 'General';
+
+        // Handle file upload (mandatory)
+        $uploaded_file_path = null;
+        if (!isset($_FILES['supporting_document']) || $_FILES['supporting_document']['error'] !== UPLOAD_ERR_OK) {
+            throw new Exception("Supporting document is mandatory. Please upload a file.");
+        }
+        
         $upload_dir = 'uploads/risk_documents/';
         if (!is_dir($upload_dir)) {
             mkdir($upload_dir, 0755, true);
         }
-        $file_extension = strtolower(pathinfo($_FILES['risk_document']['name'], PATHINFO_EXTENSION));
-        $allowed_extensions = ['pdf', 'doc', 'docx', 'txt', 'jpg', 'jpeg', 'png'];
-        if (in_array($file_extension, $allowed_extensions)) {
-            $file_name = uniqid() . '_' . time() . '.' . $file_extension;
-            $upload_path = $upload_dir . $file_name;
-            if (move_uploaded_file($_FILES['risk_document']['tmp_name'], $upload_path)) {
-                $uploaded_file_path = $upload_path;
+        
+        $file_extension = strtolower(pathinfo($_FILES['supporting_document']['name'], PATHINFO_EXTENSION));
+        $allowed_extensions = ['pdf', 'doc', 'docx', 'txt', 'jpg', 'jpeg', 'png', 'xlsx', 'xls', 'msg', 'eml'];
+        $max_file_size = 10 * 1024 * 1024; // 10MB
+        
+        if (!in_array($file_extension, $allowed_extensions)) {
+            throw new Exception("Invalid file type. Please upload PDF, DOC, DOCX, TXT, JPG, PNG, Excel, or email files.");
+        }
+        
+        if ($_FILES['supporting_document']['size'] > $max_file_size) {
+            throw new Exception("File too large. Please upload files under 10MB.");
+        }
+        
+        $file_name = uniqid() . '_' . time() . '.' . $file_extension;
+        $upload_path = $upload_dir . $file_name;
+        if (!move_uploaded_file($_FILES['supporting_document']['tmp_name'], $upload_path)) {
+            throw new Exception("Failed to upload supporting document.");
+        }
+        $uploaded_file_path = $upload_path;
+
+        // Verify user session and database user
+        if (!isset($_SESSION['user_id']) || empty($_SESSION['user_id'])) {
+            throw new Exception("Session expired. Please log in again.");
+        }
+
+        $user_check_query = "SELECT id FROM users WHERE id = :user_id";
+        $user_check_stmt = $db->prepare($user_check_query);
+        $user_check_stmt->bindParam(':user_id', $_SESSION['user_id']);
+        $user_check_stmt->execute();
+        
+        if ($user_check_stmt->rowCount() == 0) {
+            throw new Exception("User account not found. Please contact administrator.");
+        }
+
+        // Begin transaction for data integrity
+        $db->beginTransaction();
+        
+        // Insert risk incident
+        $query = "INSERT INTO risk_incidents (
+                    risk_name,
+                    risk_categories, 
+                    date_of_occurrence,
+                    risk_description, 
+                    cause_of_risk, 
+                    department, 
+                    reported_by,
+                    risk_owner_id,
+                    involves_money_loss,
+                    money_range,
+                    reported_to_glpi,
+                    glpi_ir_number,
+                    existing_or_new,
+                    risk_status,
+                    created_at, 
+                    updated_at
+                  ) VALUES (
+                    :risk_name,
+                    :risk_categories, 
+                    :date_of_occurrence,
+                    :risk_description, 
+                    :cause_of_risk, 
+                    :department, 
+                    :reported_by,
+                    :risk_owner_id,
+                    :involves_money_loss,
+                    :money_range,
+                    :reported_to_glpi,
+                    :glpi_ir_number,
+                    'New',
+                    'pending',
+                    NOW(), 
+                    NOW()
+                  )";
+
+        $stmt = $db->prepare($query);
+        
+        // Prepare data for binding
+        $risk_categories_json = json_encode($risk_categories);
+        
+        // Bind parameters
+        $stmt->bindParam(':risk_name', $risk_name);
+        $stmt->bindParam(':risk_categories', $risk_categories_json);
+        $stmt->bindParam(':date_of_occurrence', $date_of_occurrence);
+        $stmt->bindParam(':risk_description', $risk_description);
+        $stmt->bindParam(':cause_of_risk', $cause_of_risk_json);
+        $stmt->bindParam(':department', $department);
+        $stmt->bindParam(':reported_by', $user_id);
+        $stmt->bindParam(':risk_owner_id', $user_id);
+        $stmt->bindParam(':involves_money_loss', $involves_money_loss);
+        $stmt->bindParam(':money_range', $money_range);
+        $stmt->bindParam(':reported_to_glpi', $reported_to_glpi);
+        $stmt->bindParam(':glpi_ir_number', $glpi_ir_number);
+
+        if (!$stmt->execute()) {
+            throw new Exception("Failed to insert risk incident.");
+        }
+        
+        $risk_incident_id = $db->lastInsertId();
+        
+        // Generate and update the risk_id
+        $generated_risk_id = generateRiskId($db, $department);
+        
+        if ($generated_risk_id) {
+            $update_risk_id_query = "UPDATE risk_incidents SET risk_id = :risk_id WHERE id = :id";
+            $update_risk_id_stmt = $db->prepare($update_risk_id_query);
+            $update_risk_id_stmt->bindParam(':risk_id', $generated_risk_id);
+            $update_risk_id_stmt->bindParam(':id', $risk_incident_id);
+            
+            if (!$update_risk_id_stmt->execute()) {
+                throw new Exception("Failed to update risk ID.");
+            }
+        } else {
+            throw new Exception("Failed to generate risk ID.");
+        }
+        
+        // Handle document upload
+        if ($uploaded_file_path) {
+            $file_content = file_get_contents($uploaded_file_path);
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            $mime_type = finfo_file($finfo, $uploaded_file_path);
+            finfo_close($finfo);
+            
+            $doc_query = "INSERT INTO risk_documents (
+                            risk_id, 
+                            section_type, 
+                            original_filename, 
+                            stored_filename, 
+                            file_path, 
+                            file_size, 
+                            document_content,
+                            mime_type,
+                            uploaded_by, 
+                            uploaded_at
+                          ) VALUES (
+                            :risk_id, 
+                            'risk_identification', 
+                            :original_filename, 
+                            :stored_filename, 
+                            :file_path, 
+                            :file_size, 
+                            :document_content,
+                            :mime_type,
+                            :uploaded_by, 
+                            NOW()
+                          )";
+            
+            $doc_stmt = $db->prepare($doc_query);
+            $original_filename = $_FILES['supporting_document']['name'];
+            $stored_filename = basename($uploaded_file_path);
+            $file_size = $_FILES['supporting_document']['size'];
+            
+            $doc_stmt->bindParam(':risk_id', $risk_incident_id);
+            $doc_stmt->bindParam(':original_filename', $original_filename);
+            $doc_stmt->bindParam(':stored_filename', $stored_filename);
+            $doc_stmt->bindParam(':file_path', $uploaded_file_path);
+            $doc_stmt->bindParam(':file_size', $file_size);
+            $doc_stmt->bindParam(':document_content', $file_content, PDO::PARAM_LOB);
+            $doc_stmt->bindParam(':mime_type', $mime_type);
+            $doc_stmt->bindParam(':uploaded_by', $user_id);
+            
+            if (!$doc_stmt->execute()) {
+                throw new Exception("Failed to upload supporting document.");
             }
         }
-    }
+        
+        // Commit transaction
+        $db->commit();
+        
+        // Call auto-assignment function
+        $assignment_result = assignRiskAutomatically($risk_incident_id, $_SESSION['user_id'], $db);
 
-    // Verify user session and database user
-    if (!isset($_SESSION['user_id']) || empty($_SESSION['user_id'])) {
-        $error_message = "Session expired. Please log in again.";
-        header("Location: login.php");
-        exit();
-    }
-
-    $user_check_query = "SELECT id FROM users WHERE id = :user_id";
-    $user_check_stmt = $db->prepare($user_check_query);
-    $user_check_stmt->bindParam(':user_id', $_SESSION['user_id']);
-    $user_check_stmt->execute();
-    if ($user_check_stmt->rowCount() == 0) {
-        $error_message = "User account not found. Please contact administrator.";
-    } else {
-        try {
-            $db->beginTransaction();
-            
-            $query = "INSERT INTO risk_incidents (
-                        risk_name,
-                        risk_categories, 
-                        category_details, 
-                        risk_description, 
-                        cause_of_risk, 
-                        department, 
-                        reported_by,
-                        risk_owner_id,
-                        inherent_likelihood,
-                        inherent_consequence,
-                        risk_rating,
-                        involves_money_loss,
-                        money_amount,
-                        existing_or_new,
-                        treatment_status,
-                        risk_status,
-                        created_at, 
-                        updated_at
-                      ) VALUES (
-                        :risk_name,
-                        :risk_categories, 
-                        :category_details, 
-                        :risk_description, 
-                        :cause_of_risk, 
-                        :department, 
-                        :reported_by,
-                        :risk_owner_id,
-                        1,
-                        1,
-                        1,
-                        :involves_money_loss,
-                        :money_amount,
-                        'New',
-                        'Not Started',
-                        'pending',
-                        NOW(), 
-                        NOW()
-                      )";
-
-            $stmt = $db->prepare($query);
-            
-            $risk_name = $risk_description . '...'; // Generate risk name from description
-            $risk_categories_json = json_encode($risk_categories);
-            $category_details_json = json_encode($category_details);
-            $user_id = $_SESSION['user_id'];
-            $department_val = $department;
-            $involves_money = isset($_POST['involves_money_loss']) ? $_POST['involves_money_loss'] == 'Yes' ? 1 : 0 : 0;
-            $money_amount_val = isset($_POST['money_amount']) ? $_POST['money_amount'] : '0.00';
-            
-            $stmt->bindParam(':risk_name', $risk_name);
-            $stmt->bindParam(':risk_categories', $risk_categories_json);
-            $stmt->bindParam(':category_details', $category_details_json);
-            $stmt->bindParam(':risk_description', $risk_description);
-            $stmt->bindParam(':cause_of_risk', $cause_of_risk);
-            $stmt->bindParam(':department', $department_val);
-            $stmt->bindParam(':reported_by', $user_id);
-            $stmt->bindParam(':risk_owner_id', $user_id);
-            $stmt->bindParam(':involves_money_loss', $involves_money);
-            $stmt->bindParam(':money_amount', $money_amount_val);
-
-            if ($stmt->execute()) {
-                $risk_id = $db->lastInsertId();
-                
-                if ($uploaded_file_path) {
-                    $doc_query = "INSERT INTO risk_documents (
-                                    risk_id, 
-                                    section_type, 
-                                    original_filename, 
-                                    stored_filename, 
-                                    file_path, 
-                                    file_size,
-                                    document_content,
-                                    mime_type, 
-                                    uploaded_by, 
-                                    uploaded_at
-                                  ) VALUES (
-                                    :risk_id, 
-                                    'risk_identification', 
-                                    :original_filename, 
-                                    :stored_filename, 
-                                    :file_path, 
-                                    :file_size,
-                                    :document_content,
-                                    :mime_type, 
-                                    :uploaded_by, 
-                                    NOW()
-                                  )";
-
-                    $doc_stmt = $db->prepare($doc_query);
-                    $original_filename = $_FILES['risk_document']['name'];
-                    $stored_filename = basename($uploaded_file_path);
-                    $file_size = $_FILES['risk_document']['size'];
-
-                    $file_content = file_get_contents($uploaded_file_path);
-                    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-                    $mime_type = finfo_file($finfo, $uploaded_file_path);
-                    finfo_close($finfo);
-
-                    $doc_stmt->bindParam(':risk_id', $risk_id);
-                    $doc_stmt->bindParam(':original_filename', $original_filename);
-                    $doc_stmt->bindParam(':stored_filename', $stored_filename);
-                    $doc_stmt->bindParam(':file_path', $uploaded_file_path);
-                    $doc_stmt->bindParam(':file_size', $file_size);
-                    $doc_stmt->bindParam(':document_content', $file_content, PDO::PARAM_LOB);
-                    $doc_stmt->bindParam(':mime_type', $mime_type);
-                    $doc_stmt->bindParam(':uploaded_by', $user_id);
-
-                    $doc_stmt->execute();
-                }
-                
-                $db->commit();
-                
-                // Call auto-assignment function
-                $assignment_result = assignRiskAutomatically($risk_id, $_SESSION['user_id'], $db);
-
-                if ($assignment_result['success']) {
-                    header("Location: staff_dashboard.php?success=assigned");
-                    exit();
-                } else {
-                    header("Location: staff_dashboard.php?success=no_owner_designated");
-                    exit();
-                }
-            } else {
-                $db->rollback();
-                $error_message = "Failed to report risk. Please try again.";
-            }
-        } catch (PDOException $e) {
+        if ($assignment_result['success']) {
+            header("Location: staff_dashboard.php?success=assigned");
+            exit();
+        } else {
+            header("Location: staff_dashboard.php?success=no_owner_designated");
+            exit();
+        }
+        
+    } catch (Exception $e) {
+        // Rollback transaction on error
+        if ($db->inTransaction()) {
             $db->rollback();
-            $error_message = "Database error: " . $e->getMessage();
-            error_log("Risk submission error: " . $e->getMessage());
         }
+        $error_message = "Error: " . $e->getMessage();
+        error_log("Risk submission error: " . $e->getMessage());
+    } catch (PDOException $e) {
+        // Rollback transaction on database error
+        if ($db->inTransaction()) {
+            $db->rollback();
+        }
+        $error_message = "Database error occurred. Please try again.";
+        error_log("Risk submission database error: " . $e->getMessage());
     }
 }
 
@@ -222,10 +344,10 @@ if (isset($_GET['success'])) {
         case 'no_owner_designated':
             $success_message = "Risk reported successfully! No designated risk owner found for your account. Please contact your administrator.";
             break;
-        case 'reported': // Fallback for previous logic, can be removed if not needed
+        case 'reported':
             $success_message = "Risk reported successfully! Assignment in progress.";
             break;
-        case 'no_owner': // Fallback for previous logic, can be removed if not needed
+        case 'no_owner':
             $success_message = "Risk reported successfully! No risk owners available in your department at the moment.";
             break;
     }
@@ -246,7 +368,6 @@ $user_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Get current user info with department from database
 $user = getCurrentUser();
-// If department is not in session, fetch from database
 if (empty($user['department']) || $user['department'] === null) {
     $dept_query = "SELECT department FROM users WHERE id = :user_id";
     $dept_stmt = $db->prepare($dept_query);
@@ -255,7 +376,6 @@ if (empty($user['department']) || $user['department'] === null) {
     $dept_result = $dept_stmt->fetch(PDO::FETCH_ASSOC);
     if ($dept_result && !empty($dept_result['department'])) {
         $user['department'] = $dept_result['department'];
-        // Store in session for future use
         $_SESSION['department'] = $dept_result['department'];
     }
 }
@@ -278,12 +398,11 @@ if (empty($user['department']) || $user['department'] === null) {
             color: #333;
             line-height: 1.6;
             min-height: 100vh;
-            padding-top: 100px; /* Add padding for fixed header */
+            padding-top: 100px;
         }
         .dashboard {
             min-height: 100vh;
         }
-        /* Header */
         .header {
             background: #E60012;
             padding: 1.5rem 2rem;
@@ -394,20 +513,17 @@ if (empty($user['department']) || $user['department'] === null) {
             background: rgba(255, 255, 255, 0.3);
             border-color: rgba(255, 255, 255, 0.5);
         }
-        /* Main Content */
         .main-content {
             max-width: 1200px;
             margin: 0 auto;
             padding: 2rem;
         }
-        /* Main Cards Layout */
         .main-cards-layout {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 2rem;
             margin-bottom: 2rem;
         }
-        /* Hero Section */
         .hero {
             text-align: center;
             padding: 5rem 3rem;
@@ -437,7 +553,6 @@ if (empty($user['department']) || $user['department'] === null) {
         .cta-button:hover {
             background: #B8000E;
         }
-        /* Stats Card */
         .stat-card {
             background: white;
             border-radius: 15px;
@@ -478,7 +593,6 @@ if (empty($user['department']) || $user['department'] === null) {
             justify-content: center;
             gap: 0.5rem;
         }
-        /* Reports Section */
         .reports-section {
             background: white;
             border-radius: 8px;
@@ -625,7 +739,6 @@ if (empty($user['department']) || $user['department'] === null) {
         .chatbot:hover {
             transform: scale(1.1);
         }
-        /* Modal Styles */
         .modal {
             display: none;
             position: fixed;
@@ -718,46 +831,40 @@ if (empty($user['department']) || $user['department'] === null) {
         .btn:hover {
             background: #B8000E;
         }
-        /* File upload styles */
-        .file-upload-area {
-            border: 2px dashed #e1e5e9;
+        .styled-file-container {
+            margin-top: 10px;
+        }
+        .styled-file-upload {
+            position: relative;
+            display: inline-block;
+            width: 100%;
+        }
+        .styled-file-input {
+            position: absolute;
+            left: -9999px;
+        }
+        .styled-file-label {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 15px 20px;
+            border: 2px dashed #ddd;
             border-radius: 8px;
-            padding: 1.2rem; /* Reduced padding */
-            text-align: center;
-            transition: border-color 0.3s;
             background: #f8f9fa;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: #666;
+            font-size: 1rem;
         }
-        .file-upload-area:hover {
-            border-color: #E60012;
-        }
-        .file-upload-area.dragover {
+        .styled-file-label:hover {
             border-color: #E60012;
             background: rgba(230, 0, 18, 0.05);
+            color: #E60012;
         }
-        .file-upload-icon {
-            font-size: 1.8rem; /* Adjusted font size */
-            color: #666;
-            margin-bottom: 0.8rem; /* Adjusted margin */
+        .styled-file-label i {
+            font-size: 1.5rem;
         }
-        .file-upload-text {
-            color: #666;
-            margin-bottom: 0.4rem; /* Adjusted margin */
-            font-size: 0.95rem; /* Adjusted font size */
-        }
-        .file-upload-hint {
-            font-size: 0.8rem; /* Adjusted font size */
-            color: #999;
-        }
-        .file-input {
-            display: none;
-        }
-        .file-selected {
-            background: #d4edda;
-            border-color: #28a745;
-            color: #155724;
-        }
-
-        /* Fixed Risk Categories Styling */
         .risk-categories-container {
             background: #f8f9fa;
             border: 1px solid #ddd;
@@ -766,16 +873,13 @@ if (empty($user['department']) || $user['department'] === null) {
             max-height: 400px;
             overflow-y: auto;
         }
-
         .category-item {
             margin-bottom: 15px;
         }
-
         .category-item:last-child {
             margin-bottom: 0;
         }
-
-        .checkbox-label {
+        .radio-category-label {
             display: flex;
             align-items: center;
             cursor: pointer;
@@ -790,22 +894,22 @@ if (empty($user['department']) || $user['department'] === null) {
             width: 100%;
             box-shadow: 0 2px 4px rgba(230, 0, 18, 0.2);
         }
-
-        .checkbox-label:hover {
+        .radio-category-label:hover {
             background: linear-gradient(135deg, #B8000E, #A50010);
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(230, 0, 18, 0.3);
         }
-
-        .checkbox-label input[type="checkbox"] {
+        .radio-category-label input[type="radio"] {
             margin-right: 15px;
             width: 18px;
             height: 18px;
             accent-color: white;
             cursor: pointer;
         }
-
-        /* Document Link Styles */
+        .checkmark {
+            color: white;
+            font-weight: 500;
+        }
         .document-link {
             display: inline-flex;
             align-items: center;
@@ -820,20 +924,16 @@ if (empty($user['department']) || $user['department'] === null) {
             transition: background 0.3s;
             margin-top: 0.5rem;
         }
-
         .document-link:hover {
             background: #B8000E;
             color: white;
             text-decoration: none;
         }
-
-        /* Radio Button Styles */
         .radio-group {
             display: flex;
             gap: 20px;
             margin-bottom: 15px;
         }
-
         .radio-option {
             display: flex;
             align-items: center;
@@ -846,16 +946,13 @@ if (empty($user['department']) || $user['department'] === null) {
             min-width: 120px;
             font-weight: 500;
         }
-
         .radio-option:hover {
             border-color: #E60012;
             background: rgba(230, 0, 18, 0.05);
         }
-
         .radio-option input[type="radio"] {
             display: none;
         }
-
         .radio-custom {
             width: 20px;
             height: 20px;
@@ -865,12 +962,10 @@ if (empty($user['department']) || $user['department'] === null) {
             position: relative;
             transition: all 0.3s ease;
         }
-
         .radio-option input[type="radio"]:checked + .radio-custom {
             border-color: #E60012;
             background: #E60012;
         }
-
         .radio-option input[type="radio"]:checked + .radio-custom::after {
             content: '';
             position: absolute;
@@ -882,19 +977,15 @@ if (empty($user['department']) || $user['department'] === null) {
             background: white;
             border-radius: 50%;
         }
-
         .radio-option input[type="radio"]:checked ~ .radio-text {
             color: #E60012;
             font-weight: 600;
         }
-
         .radio-text {
             font-size: 1rem;
             color: #333;
             transition: color 0.3s ease;
         }
-
-        /* Modal Info Display */
         .modal-info-display {
             background: #f8f9fa;
             padding: 1rem;
@@ -902,11 +993,278 @@ if (empty($user['department']) || $user['department'] === null) {
             border-left: 3px solid #E60012;
             margin-bottom: 1rem;
         }
+        .section-header {
+            color: #E60012;
+            margin-bottom: 1.5rem;
+            border-bottom: 2px solid #E60012;
+            padding-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 1.2rem;
+            font-weight: 600;
+        }
+        .conditional-section {
+            display: none;
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-left: 3px solid #E60012;
+            border-radius: 4px;
+        }
+        .conditional-section.show {
+            display: block;
+        }
+        .dropdown-container {
+            margin-top: 10px;
+        }
+        .cause-dropdown {
+            width: 100%;
+            padding: 0.9rem;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-size: 1rem;
+            background: white;
+        }
+        .cause-dropdown:focus {
+            outline: none;
+            border-color: #E60012;
+            box-shadow: 0 0 0 3px rgba(230, 0, 18, 0.1);
+        }
+        .info-text {
+            font-size: 0.9rem;
+            color: #666;
+            margin-top: 0.5rem;
+            font-style: italic;
+        }
 
-        /* Responsive */
+        /* Added styling for form section headers */
+        .form-label {
+            display: block;
+            margin-bottom: 0.8rem;
+            color: #E60012;
+            font-weight: 700;
+            font-size: 1.1rem;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            border-left: 4px solid #E60012;
+            padding-left: 12px;
+            background: linear-gradient(90deg, rgba(230, 0, 18, 0.05) 0%, transparent 100%);
+            padding-top: 8px;
+            padding-bottom: 8px;
+            border-radius: 4px;
+        }
+        
+        .form-label small {
+            text-transform: none;
+            font-weight: 500;
+            font-size: 0.85rem;
+            color: #666;
+            display: block;
+            margin-top: 4px;
+        }
+        
+        /* Added styles for cause of risk clickable cards */
+        .cause-cards-container {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .cause-card {
+            background: white;
+            border: 2px solid #e1e5e9;
+            border-radius: 12px;
+            padding: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+            position: relative;
+        }
+        
+        .cause-card:hover {
+            border-color: #E60012;
+            background: rgba(230, 0, 18, 0.05);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(230, 0, 18, 0.15);
+        }
+        
+        .cause-card-icon {
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+        
+        .cause-card-title {
+            font-weight: 600;
+            color: #333;
+            font-size: 1rem;
+            margin-bottom: 5px;
+        }
+        
+        .cause-card-count {
+            font-size: 0.85rem;
+            color: #E60012;
+            font-weight: 600;
+            margin-top: 8px;
+            min-height: 20px;
+        }
+        
+        .cause-card.has-selections {
+            border-color: #E60012;
+            background: rgba(230, 0, 18, 0.08);
+        }
+        
+        /* Added styles for cause selection modal */
+        .cause-modal {
+            display: none;
+            position: fixed;
+            z-index: 2000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.6);
+        }
+        
+        .cause-modal.show {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .cause-modal-content {
+            background: white;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        
+        .cause-modal-header {
+            background: #E60012;
+            color: white;
+            padding: 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-radius: 12px 12px 0 0;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        .cause-modal-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin: 0;
+        }
+        
+        .cause-modal-close {
+            color: white;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: background 0.3s;
+        }
+        
+        .cause-modal-close:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        .cause-modal-body {
+            padding: 2rem;
+        }
+        
+        .checkbox-item {
+            margin-bottom: 12px;
+            padding: 12px 15px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .checkbox-item:hover {
+            border-color: #E60012;
+            background: rgba(230, 0, 18, 0.05);
+        }
+        
+        .checkbox-item.checked {
+            border-color: #E60012;
+            background: rgba(230, 0, 18, 0.08);
+        }
+        
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            margin: 0;
+            font-weight: 500;
+        }
+        
+        .checkbox-label input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+            cursor: pointer;
+            accent-color: #E60012;
+        }
+        
+        .cause-modal-footer {
+            padding: 1.5rem;
+            border-top: 1px solid #e1e5e9;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            position: sticky;
+            bottom: 0;
+            background: white;
+        }
+        
+        .cause-modal-btn {
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: none;
+            font-size: 1rem;
+        }
+        
+        .cause-modal-btn-cancel {
+            background: #f8f9fa;
+            color: #333;
+            border: 2px solid #e1e5e9;
+        }
+        
+        .cause-modal-btn-cancel:hover {
+            background: #e9ecef;
+        }
+        
+        .cause-modal-btn-save {
+            background: #E60012;
+            color: white;
+        }
+        
+        .cause-modal-btn-save:hover {
+            background: #B8000E;
+        }
+        
         @media (max-width: 768px) {
             body {
-                padding-top: 120px; /* Increased padding for mobile header */
+                padding-top: 120px;
             }
             .header {
                 padding: 1.2rem 1.5rem;
@@ -970,12 +1328,24 @@ if (empty($user['department']) || $user['department'] === null) {
             .modal-body {
                 padding: 1.5rem;
             }
+            /* Added responsive styles for cause cards */
+            .cause-cards-container {
+                grid-template-columns: 1fr;
+            }
+            
+            .cause-modal-content {
+                width: 95%;
+                max-height: 85vh;
+            }
+            
+            .cause-modal-body {
+                padding: 1.5rem;
+            }
         }
     </style>
 </head>
 <body>
     <div class="dashboard">
-        <!-- Header -->
         <header class="header">
             <div class="header-content">
                 <div class="header-left">
@@ -983,7 +1353,7 @@ if (empty($user['department']) || $user['department'] === null) {
                         <img src="image.png" alt="Airtel Logo" />
                     </div>
                     <div class="header-titles">
-                        <h1 class="main-title">Airtel Risk Register System</h1>
+                        <h1 class="main-title">Airtel Risk Management</h1>
                         <p class="sub-title">Risk Management System</p>
                     </div>
                 </div>
@@ -997,26 +1367,24 @@ if (empty($user['department']) || $user['department'] === null) {
                 </div>
             </div>
         </header>
-        <!-- Main Content -->
         <main class="main-content">
-            <?php if (isset($success_message)): ?><div class="success">
-    ✅ <?php echo $success_message; ?></div><?php endif; ?>
+            <?php if (isset($success_message)): ?>
+                <div class="success">✅ <?php echo $success_message; ?></div>
+            <?php endif; ?>
             <?php if (isset($error_message)): ?>
                 <div class="error">❌ <?php echo $error_message; ?></div>
             <?php endif; ?>
-            <!-- Main Cards Layout -->
             <div class="main-cards-layout">
-                <!-- Hero Section -->
                 <section class="hero">
-    <div style="text-align: center;">
-        <button class="cta-button" onclick="openReportModal()">
-            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
-            </svg>
-            Report New Risk
-        </button>
-    </div></section>
-                <!-- Stats Card -->
+                    <div style="text-align: center;">
+                        <button class="cta-button" onclick="openReportModal()">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+                            </svg>
+                            Report New Risk
+                        </button>
+                    </div>
+                </section>
                 <div class="stat-card" id="statsCard" onclick="scrollToReports()">
                     <div class="stat-number"><?php echo count($user_risks); ?></div>
                     <div class="stat-label">Risks Reported</div>
@@ -1028,9 +1396,6 @@ if (empty($user['department']) || $user['department'] === null) {
                     </div>
                 </div>
             </div>
-            <!-- Workflow Explanation Section -->
-            <!-- Info Section -->
-            <!-- Reports Section -->
             <section class="reports-section" id="reportsSection">
                 <div class="reports-header">
                     <h2 class="reports-title">
@@ -1044,42 +1409,41 @@ if (empty($user['department']) || $user['department'] === null) {
                 <div class="reports-content">
                     <?php if (count($user_risks) > 0): ?>
                         <?php foreach (array_slice($user_risks, 0, 10) as $risk): ?>
-    <div class="risk-item">
-        <div class="risk-header">
-            <!-- Display risk categories without quotes/brackets -->
-            <div class="risk-name">
-                <?php 
-                $categories = json_decode($risk['risk_categories'], true);
-                if (is_array($categories)) {
-                    echo htmlspecialchars(implode(', ', $categories));
-                } else {
-                    echo htmlspecialchars($risk['risk_categories']);
-                }
-                ?>
-            </div>
-            <div style="display: flex; gap: 0.5rem; align-items: center;">
-                <?php if ($risk['risk_owner_id']): ?>
-                    <span style="background: #d4edda; color: #155724; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">
-                        ✅ Assigned
-                    </span>
-                <?php else: ?>
-                    <span style="background: #fff3cd; color: #856404; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">
-                        🔄 Assigning...
-                    </span>
-                <?php endif; ?>
-                <button class="view-btn" onclick="viewRisk(<?php echo $risk['id']; ?>, '<?php echo htmlspecialchars($risk['risk_categories']); ?>', '<?php echo htmlspecialchars($risk['risk_description']); ?>', '<?php echo htmlspecialchars($risk['cause_of_risk']); ?>', '<?php echo $risk['created_at']; ?>', <?php echo $risk['risk_owner_id'] ? 'true' : 'false'; ?>, '<?php echo htmlspecialchars($risk['document_path'] ?? ''); ?>', '<?php echo htmlspecialchars($risk['document_filename'] ?? ''); ?>')">>
-                    View
-                </button>
-            </div>
-        </div>
-        <div class="risk-meta">
-            <span><?php echo date('M d, Y', strtotime($risk['created_at'])); ?></span>
-            <?php if ($risk['risk_owner_id']): ?>
-                <span style="color:rgb(204, 11, 11);">• Risk Owner Assigned</span>
-            <?php endif; ?>
-        </div>
-    </div>
-<?php endforeach; ?>
+                            <div class="risk-item">
+                                <div class="risk-header">
+                                    <div class="risk-name">
+                                        <?php 
+                                        $categories = json_decode($risk['risk_categories'], true);
+                                        if (is_array($categories)) {
+                                            echo htmlspecialchars(implode(', ', $categories));
+                                        } else {
+                                            echo htmlspecialchars($risk['risk_categories']);
+                                        }
+                                        ?>
+                                    </div>
+                                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                        <?php if ($risk['risk_owner_id']): ?>
+                                            <span style="background: #d4edda; color: #155724; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">
+                                                ✅ Assigned
+                                            </span>
+                                        <?php else: ?>
+                                            <span style="background: #fff3cd; color: #856404; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">
+                                                🔄 Assigning...
+                                            </span>
+                                        <?php endif; ?>
+                                        <button class="view-btn" onclick="viewRisk(<?php echo $risk['id']; ?>, '<?php echo htmlspecialchars(json_encode(json_decode($risk['risk_categories'], true))); ?>', '<?php echo htmlspecialchars($risk['risk_description']); ?>', '<?php echo htmlspecialchars($risk['cause_of_risk']); ?>', '<?php echo $risk['created_at']; ?>', <?php echo $risk['risk_owner_id'] ? 'true' : 'false'; ?>, '<?php echo htmlspecialchars($risk['document_path'] ?? ''); ?>', '<?php echo htmlspecialchars($risk['document_filename'] ?? ''); ?>')">
+                                            View
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="risk-meta">
+                                    <span><?php echo date('M d, Y', strtotime($risk['created_at'])); ?></span>
+                                    <?php if ($risk['risk_owner_id']): ?>
+                                        <span style="color:rgb(204, 11, 11);">• Risk Owner Assigned</span>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
                     <?php else: ?>
                         <div class="empty-state">
                             <div class="empty-icon">📋</div>
@@ -1091,7 +1455,7 @@ if (empty($user['department']) || $user['department'] === null) {
             </section>
         </main>
     </div>
-    <!-- Risk Report Modal -->
+    
     <div id="reportModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -1099,145 +1463,241 @@ if (empty($user['department']) || $user['department'] === null) {
                 <button class="close" onclick="closeReportModal()">&times;</button>
             </div>
             <div class="modal-body">
-                
                 <form id="riskForm" method="POST" enctype="multipart/form-data" style="background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                    <h3 style="color: #E60012; margin-bottom: 1rem; border-bottom: 2px solid #E60012; padding-bottom: 0.5rem;">
-                        Risk Identification Form (Staff View)
-                    </h3>
+                    <div class="section-header">
+                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                        </svg>
+                        Section 1: Risk Identification
+                    </div>
                     
-                    <!-- Fixed risk categories with better alignment -->
                     <div class="form-group">
-                        <label class="form-label"><strong>1. Risk Categories</strong> <span style="color: red;">*</span> <small>(Select all that apply)</small></label>
+                        <label class="form-label">A. Risk Categories * <small>(Select one primary risk)</small></label>
                         <div class="risk-categories-container">
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Financial Exposure">
-                                    Financial Exposure
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Financial Exposure" required>
+                                    <span class="checkmark">Financial Exposure [Revenue, Operating Expenditure, Book value]</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Decrease in market share">
-                                    Decrease in market share
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Decrease in market share" required>
+                                    <span class="checkmark">Decrease in market share</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Customer Experience">
-                                    Customer Experience
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Customer Experience" required>
+                                    <span class="checkmark">Customer Experience</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Compliance">
-                                    Compliance
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Compliance" required>
+                                    <span class="checkmark">Compliance</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Reputation">
-                                    Reputation
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Reputation" required>
+                                    <span class="checkmark">Reputation</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Fraud">
-                                    Fraud
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Fraud" required>
+                                    <span class="checkmark">Fraud</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Operations">
-                                    Operations
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Operations" required>
+                                    <span class="checkmark">Operations (Business continuity)</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Networks">
-                                    Networks
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Networks" required>
+                                    <span class="checkmark">Networks</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="People">
-                                    People
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="People" required>
+                                    <span class="checkmark">People</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="IT">
-                                    IT
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="IT" required>
+                                    <span class="checkmark">IT (Cybersecurity & Data Privacy)</span>
                                 </label>
                             </div>
-                            
                             <div class="category-item">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="risk_categories[]" value="Other">
-                                    Other
+                                <label class="radio-category-label">
+                                    <input type="radio" name="risk_categories" value="Other" required>
+                                    <span class="checkmark">Other</span>
                                 </label>
                             </div>
-                        </div>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="risk_description"><strong>2. Risk Description</strong> <span style="color: red;">*</span></label>
-                        <textarea id="risk_description" name="risk_description" required placeholder="Describe the risk in detail - what exactly is the problem or potential issue?"></textarea>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="cause_of_risk"><strong>3. Cause of Risk</strong> <span style="color: red;">*</span></label>
-                        <textarea id="cause_of_risk" name="cause_of_risk" required placeholder="What causes this risk? What are the root causes or contributing factors?"></textarea>
-                    </div>
-                    
-                    <!-- Money loss field with improved styling -->
-                    <div class="form-group">
-                        <label class="form-label"><strong>4. Does your risk involves loss of money?</strong> <span style="color: red;">*</span></label>
-                        <div class="radio-group">
-                            <label class="radio-option">
-                                <input type="radio" name="involves_money_loss" value="Yes" onchange="toggleMoneyAmount()" required>
-                                <span class="radio-custom"></span>
-                                <span class="radio-text">Yes</span>
-                            </label>
-                            <label class="radio-option">
-                                <input type="radio" name="involves_money_loss" value="No" onchange="toggleMoneyAmount()" required>
-                                <span class="radio-custom"></span>
-                                <span class="radio-text">No</span>
-                            </label>
-                        </div>
-                        <div id="money_amount_field" style="display: none; margin-top: 15px;">
-                            <label for="money_amount"><strong>Amount</strong></label>
-                            <input type="number" id="money_amount" name="money_amount" placeholder="Enter amount in your local currency" style="width: 100%; padding: 12px; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem; margin-top: 8px;">
                         </div>
                     </div>
 
-                    
                     <div class="form-group">
-                        <label for="risk_document"><strong>5. Supporting Document</strong> (Optional)</label>
-                        <div class="file-upload-area" id="fileUploadArea" onclick="document.getElementById('risk_document').click()">
-                            <div class="file-upload-icon">📄</div>
-                            <div class="file-upload-text">Click to upload a document</div>
-                            <div class="file-upload-hint">Supports: PDF, DOC, DOCX, TXT, JPG, PNG (Max 10MB)</div>
-                        </div>
-                        <input type="file" id="risk_document" name="risk_document" class="file-input" accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png" onchange="handleFileSelect(this)">
+                        <label class="form-label">B. Date of Occurrence *</label>
+                        <input type="date" name="date_of_occurrence" class="form-control" required max="<?php echo date('Y-m-d'); ?>" style="width: 100%; padding: 0.9rem; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem;">
+                        <small class="info-text">Select the date when the risk occurred</small>
                     </div>
-                    
-                    <button type="submit" name="submit_risk" style="background: #E60012; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; width: 100%;">
+
+                    <div class="form-group">
+                        <label class="form-label">C. Does your risk involves loss of money? *</label>
+                        <div class="risk-categories-container">
+                            <div class="category-item">
+                                <label class="radio-category-label">
+                                    <input type="radio" name="involves_money_loss" value="yes" onchange="toggleMoneyRange(this)" required>
+                                    <span class="checkmark">Yes</span>
+                                </label>
+                            </div>
+                            <div class="category-item">
+                                <label class="radio-category-label">
+                                    <input type="radio" name="involves_money_loss" value="no" onchange="toggleMoneyRange(this)" required>
+                                    <span class="checkmark">No</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div id="money-range-section" class="conditional-section">
+                            <label class="form-label">Select Money Range *</label>
+                            <select name="money_range" class="cause-dropdown">
+                                <option value="">-- Select Range --</option>
+                                <option value="0 - 100,000">0 - 100,000</option>
+                                <option value="100,001 - 500,000">100,001 - 500,000</option>
+                                <option value="500,001 - 1,000,000">500,001 - 1,000,000</option>
+                                <option value="1,000,001 - 2,500,000">1,000,001 - 2,500,000</option>
+                                <option value="2,500,001 - 5,000,000">2,500,001 - 5,000,000</option>
+                                <option value="5,000,000+">5,000,000+</option>
+                            </select>
+                            <small class="info-text">Select the estimated financial impact range</small>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">D. Risk Description *</label>
+                        <div class="styled-textarea-container">
+                            <textarea name="risk_description" class="styled-textarea" required placeholder="Example: On January 15th, 2025, at the Kampala branch office, a system outage occurred due to server failure, causing customer service disruptions for 3 hours. The incident affected approximately 500 customers who were unable to access mobile money services. The root cause was identified as inadequate server maintenance and lack of backup systems." style="width: 100%; padding: 0.9rem; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem; height: 150px; resize: vertical;"></textarea>
+                        </div>
+                        <small class="info-text">Describe WHAT happened, WHERE it occurred, HOW it happened, and WHEN it took place</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">E. Cause of Risk *</label>
+                        <small class="info-text" style="display: block; margin-bottom: 15px;">Click on each category to select applicable causes. You can select from multiple categories.</small>
+                        
+                        <div class="cause-cards-container">
+                            <div class="cause-card" id="peopleCard" onclick="openCauseModal('people')">
+                                <div class="cause-card-icon">👥</div>
+                                <div class="cause-card-title">People</div>
+                                <div class="cause-card-count" id="peopleCount">0 selected</div>
+                            </div>
+                            
+                            <div class="cause-card" id="processCard" onclick="openCauseModal('process')">
+                                <div class="cause-card-icon">⚙️</div>
+                                <div class="cause-card-title">Process</div>
+                                <div class="cause-card-count" id="processCount">0 selected</div>
+                            </div>
+                            
+                            <div class="cause-card" id="itSystemsCard" onclick="openCauseModal('itSystems')">
+                                <div class="cause-card-icon">💻</div>
+                                <div class="cause-card-title">IT Systems</div>
+                                <div class="cause-card-count" id="itSystemsCount">0 selected</div>
+                            </div>
+                            
+                            <div class="cause-card" id="externalCard" onclick="openCauseModal('external')">
+                                <div class="cause-card-icon">🌍</div>
+                                <div class="cause-card-title">External Environment</div>
+                                <div class="cause-card-count" id="externalCount">0 selected</div>
+                            </div>
+                        </div>
+                        
+                        <!-- Added visual summary of all selections -->
+                        <div id="causeSelectionSummary" style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #E60012; display: none;">
+                            <strong style="color: #E60012; display: block; margin-bottom: 10px;">Your Selections:</strong>
+                            <div id="summaryContent" style="font-size: 0.9rem; color: #333;"></div>
+                        </div>
+                        
+                         <!-- Hidden inputs to store selections -->
+                        <input type="hidden" name="cause_people_hidden" id="cause_people_hidden">
+                        <input type="hidden" name="cause_process_hidden" id="cause_process_hidden">
+                        <input type="hidden" name="cause_it_systems_hidden" id="cause_it_systems_hidden">
+                        <input type="hidden" name="cause_external_hidden" id="cause_external_hidden">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">F. Have you reported to GLPI? *</label>
+                        <div class="risk-categories-container">
+                            <div class="category-item">
+                                <label class="radio-category-label">
+                                    <input type="radio" name="reported_to_glpi" value="yes" onchange="toggleGLPISection(this)" required>
+                                    <span class="checkmark">Yes</span>
+                                </label>
+                            </div>
+                            <div class="category-item">
+                                <label class="radio-category-label">
+                                    <input type="radio" name="reported_to_glpi" value="no" onchange="toggleGLPISection(this)" required>
+                                    <span class="checkmark">No</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div id="glpi-ir-section" class="conditional-section">
+                            <label class="form-label">Provide IR Number *</label>
+                            <input type="text" name="glpi_ir_number" class="form-control" placeholder="Example: IR-2025-001234" style="width: 100%; padding: 0.9rem; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 1rem;">
+                            <small class="info-text">Enter the Incident Report number from GLPI system</small>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">G. Supporting Documents * (Mandatory)</label>
+                        <div class="styled-file-container">
+                            <div class="styled-file-upload">
+                                <input type="file" name="supporting_document" class="styled-file-input" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.txt,.xlsx,.xls,.msg,.eml" required id="fileInput" onchange="displayFileName()">
+                                <label class="styled-file-label" for="fileInput">
+                                    <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                                    </svg>
+                                    <span id="fileLabel">Click to upload supporting document</span>
+                                </label>
+                            </div>
+                            <small class="form-text text-muted" style="display: block; margin-top: 10px; color: #666; text-align: center;">
+                                <strong>Required:</strong> Please provide screenshots, images, PDFs, Excel sheets, email trails, or other relevant documentation<br>
+                                Accepted formats: PDF, DOC, DOCX, JPG, JPEG, PNG, TXT, XLSX, XLS, MSG, EML (Max size: 10MB)
+                            </small>
+                        </div>
+                    </div>
+
+                    <button type="submit" name="submit_risk" style="background: #E60012; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; width: 100%; font-weight: 600;">
                         Submit Risk Identification
                     </button>
                 </form>
             </div>
         </div>
     </div>
-    <!-- Risk Details Modal -->
+
+    <!-- Added modal for cause of risk selection -->
+    <div id="causeModal" class="cause-modal">
+        <div class="cause-modal-content">
+            <div class="cause-modal-header">
+                <h3 class="cause-modal-title" id="causeModalTitle">Select Causes</h3>
+                <button class="cause-modal-close" onclick="closeCauseModal()">&times;</button>
+            </div>
+            <div class="cause-modal-body" id="causeModalBody">
+                <!-- Checkboxes will be dynamically inserted here -->
+            </div>
+            <div class="cause-modal-footer">
+                <button class="cause-modal-btn cause-modal-btn-cancel" onclick="closeCauseModal()">Cancel</button>
+                <button class="cause-modal-btn cause-modal-btn-save" onclick="saveCauseSelections()">Save Selections</button>
+            </div>
+        </div>
+    </div>
+
     <div id="riskModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -1279,204 +1739,371 @@ if (empty($user['department']) || $user['department'] === null) {
             </div>
         </div>
     </div>
+
     <div class="chatbot" onclick="openChatbot()" title="Need help? Click to chat">💬</div>
+
     <script>
+        const causeData = {
+            people: {
+                title: 'People',
+                icon: '👥',
+                options: [
+                    'Training/awareness deficiencies',
+                    'Human error (mistakes, miscalculations)',
+                    'Negligence or carelessness',
+                    'Fraud or internal misconduct',
+                    'Non-compliance with procedures/process',
+                    'Supervision or oversight deficiencies',
+                    'Fatigue or stress related errors',
+                    'Unauthorized actions/ overstepping authority'
+                ]
+            },
+            process: {
+                title: 'Process',
+                icon: '⚙️',
+                options: [
+                    'Inadequate or unclear procedure/process',
+                    'Unavailable/Undefined internal controls',
+                    'Deficiencies in segregation of duties',
+                    'Delays/deficiencies in the approval process',
+                    'Monitoring deficiencies',
+                    'Reconciliation deficiencies',
+                    'Change Management deficiencies'
+                ]
+            },
+            itSystems: {
+                title: 'IT Systems',
+                icon: '💻',
+                options: [
+                    'System downtime/outages',
+                    'Software bugs or glitches',
+                    'Integration errors',
+                    'Cybersecurity breach/hacking',
+                    'Poor system design/usability',
+                    'Outdated hardware or software',
+                    'Connectivity or network failure',
+                    'Incomplete system updates/patches',
+                    'Delayed system changes'
+                ]
+            },
+            external: {
+                title: 'External Environment',
+                icon: '🌍',
+                options: [
+                    'Regulatory or legal changes',
+                    'Economic downturn or market volatility',
+                    'Natural disasters (flood, drought, earthquake)',
+                    'Political instability / Policy shifts',
+                    'Third party vendor failures',
+                    'Power outages / Infrastructure failure',
+                    'Fraud by external parties',
+                    'Pandemics or public health emergencies',
+                    'Competition pressure/Disruptive innovation'
+                ]
+            }
+        };
+        
+        let currentCategory = '';
+        let selections = {
+            people: [],
+            process: [],
+            itSystems: [],
+            external: []
+        };
+        
+        function openCauseModal(category) {
+            currentCategory = category;
+            const data = causeData[category];
+            
+            console.log('[v0] Opening modal for category:', category);
+            console.log('[v0] Current selections for this category:', selections[category]);
+            console.log('[v0] All selections:', selections);
+            
+            document.getElementById('causeModalTitle').innerHTML = data.icon + ' ' + data.title;
+            
+            const modalBody = document.getElementById('causeModalBody');
+            modalBody.innerHTML = '';
+            
+            data.options.forEach((option, index) => {
+                const isChecked = selections[category].includes(option);
+                console.log('[v0] Option:', option, 'Is checked:', isChecked);
+                
+                const checkboxItem = document.createElement('div');
+                checkboxItem.className = 'checkbox-item' + (isChecked ? ' checked' : '');
+                checkboxItem.onclick = function(e) {
+                    if (e.target.tagName !== 'INPUT') {
+                        const checkbox = this.querySelector('input[type="checkbox"]');
+                        checkbox.checked = !checkbox.checked;
+                        this.classList.toggle('checked', checkbox.checked);
+                    } else {
+                        this.classList.toggle('checked', e.target.checked);
+                    }
+                };
+                
+                checkboxItem.innerHTML = `
+                    <label class="checkbox-label">
+                        <input type="checkbox" value="${option}" ${isChecked ? 'checked' : ''}>
+                        ${option}
+                    </label>
+                `;
+                
+                modalBody.appendChild(checkboxItem);
+            });
+            
+            document.getElementById('causeModal').classList.add('show');
+        }
+        
+        function closeCauseModal() {
+            document.getElementById('causeModal').classList.remove('show');
+        }
+        
+        function saveCauseSelections() {
+            const checkboxes = document.querySelectorAll('#causeModalBody input[type="checkbox"]:checked');
+            const selectedValues = Array.from(checkboxes).map(cb => cb.value);
+            
+            console.log('[v0] Saving selections for category:', currentCategory);
+            console.log('[v0] Selected values:', selectedValues);
+            
+            selections[currentCategory] = selectedValues;
+            
+            console.log('[v0] Updated selections object:', selections);
+            
+            updateCauseCard(currentCategory);
+            updateHiddenInputs();
+            updateSelectionSummary();
+            closeCauseModal();
+        }
+        
+        function updateCauseCard(category) {
+            const count = selections[category].length;
+            const countElement = document.getElementById(category + 'Count');
+            const cardElement = document.getElementById(category + 'Card');
+            
+            console.log('[v0] Updating card for category:', category, 'Count:', count);
+            
+            if (count > 0) {
+                countElement.textContent = count + ' selected';
+                cardElement.classList.add('has-selections');
+            } else {
+                countElement.textContent = '0 selected';
+                cardElement.classList.remove('has-selections');
+            }
+        }
+        
+        function updateHiddenInputs() {
+            console.log('[v0] Updating hidden inputs with selections:', selections);
+            
+            document.getElementById('cause_people_hidden').value = JSON.stringify(selections.people);
+            document.getElementById('cause_process_hidden').value = JSON.stringify(selections.process);
+            document.getElementById('cause_it_systems_hidden').value = JSON.stringify(selections.itSystems);
+            document.getElementById('cause_external_hidden').value = JSON.stringify(selections.external);
+            
+            console.log('[v0] Hidden input values:');
+            console.log('[v0] People:', document.getElementById('cause_people_hidden').value);
+            console.log('[v0] Process:', document.getElementById('cause_process_hidden').value);
+            console.log('[v0] IT Systems:', document.getElementById('cause_it_systems_hidden').value);
+            console.log('[v0] External:', document.getElementById('cause_external_hidden').value);
+        }
+        
+        function updateSelectionSummary() {
+            const summaryDiv = document.getElementById('causeSelectionSummary');
+            const summaryContent = document.getElementById('summaryContent');
+            
+            let hasSelections = false;
+            let summaryHTML = '';
+            
+            const categoryMap = {
+                people: { title: 'People', icon: '👥' },
+                process: { title: 'Process', icon: '⚙️' },
+                itSystems: { title: 'IT Systems', icon: '💻' },
+                external: { title: 'External Environment', icon: '🌍' }
+            };
+            
+            for (const [key, value] of Object.entries(selections)) {
+                if (value.length > 0) {
+                    hasSelections = true;
+                    const category = categoryMap[key];
+                    summaryHTML += `<div style="margin-bottom: 10px;">
+                        <strong>${category.icon} ${category.title}:</strong><br>
+                        <span style="margin-left: 20px; color: #666;">${value.join(', ')}</span>
+                    </div>`;
+                }
+            }
+            
+            if (hasSelections) {
+                summaryContent.innerHTML = summaryHTML;
+                summaryDiv.style.display = 'block';
+            } else {
+                summaryDiv.style.display = 'none';
+            }
+        }
+        
+        // Close cause modal when clicking outside
+        window.addEventListener('click', function(event) {
+            const causeModal = document.getElementById('causeModal');
+            if (event.target === causeModal) {
+                closeCauseModal();
+            }
+        });
+
         document.addEventListener('DOMContentLoaded', function() {
             const statsCard = document.getElementById('statsCard');
             const reportsSection = document.getElementById('reportsSection');
-            // Hide reports section by default - user must click to view
             if (reportsSection) {
-                reportsSection.style.display = 'none';
-                reportsSection.classList.remove('show');
+                reportsSection.style.display = 'block';
+                reportsSection.classList.add('show');
             }
             if (statsCard && <?php echo count($user_risks); ?> > 0) {
                 statsCard.addEventListener('click', function() {
                     toggleReports();
                 });
             }
+
+            // Initialize cause card counts and hidden inputs on load
+            for (const category in causeData) {
+                updateCauseCard(category);
+                updateHiddenInputs();
+            }
+            // Initialize the summary display on load
+            updateSelectionSummary();
         });
-        function handleFileSelect(input) {
-            const fileUploadArea = document.getElementById('fileUploadArea');
-            const file = input.files[0];
-            if (file) {
-                // Check file size (10MB limit)
-                if (file.size > 10 * 1024 * 1024) {
-                    alert('File size must be less than 10MB');
-                    input.value = '';
-                    return;
-                }
-                fileUploadArea.classList.add('file-selected');
-                fileUploadArea.innerHTML = `
-                    <div class="file-upload-icon">✅</div>
-                    <div class="file-upload-text">File selected: ${file.name}</div>
-                    <div class="file-upload-hint">Click to change file</div>
-                `;
+
+        function toggleMoneyRange(radio) {
+            const moneyRangeSection = document.getElementById('money-range-section');
+            const moneyRangeSelect = document.querySelector('select[name="money_range"]');
+            
+            if (radio.value === 'yes') {
+                moneyRangeSection.classList.add('show');
+                moneyRangeSelect.required = true;
             } else {
-                fileUploadArea.classList.remove('file-selected');
-                fileUploadArea.innerHTML = `
-                    <div class="file-upload-icon">📄</div>
-                    <div class="file-upload-text">Click to upload a document</div>
-                    <div class="file-upload-hint">Supports: PDF, DOC, DOCX, TXT, JPG, PNG (Max 10MB)</div>
-                `;
+                moneyRangeSection.classList.remove('show');
+                moneyRangeSelect.required = false;
+                moneyRangeSelect.value = '';
             }
-        }
-        // Drag and drop functionality
-        document.addEventListener('DOMContentLoaded', function() {
-            const fileUploadArea = document.getElementById('fileUploadArea');
-            const fileInput = document.getElementById('risk_document');
-            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-                fileUploadArea.addEventListener(eventName, preventDefaults, false);
-            });
-            function preventDefaults(e) {
-                e.preventDefault();
-                e.stopPropagation();
-            }
-            ['dragenter', 'dragover'].forEach(eventName => {
-                fileUploadArea.addEventListener(eventName, highlight, false);
-            });
-            ['dragleave', 'drop'].forEach(eventName => {
-                fileUploadArea.addEventListener(eventName, unhighlight, false);
-            });
-            function highlight(e) {
-                fileUploadArea.classList.add('dragover');
-            }
-            function unhighlight(e) {
-                fileUploadArea.classList.remove('dragover');
-            }
-            fileUploadArea.addEventListener('drop', handleDrop, false);
-            function handleDrop(e) {
-                const dt = e.dataTransfer;
-                const files = dt.files;
-                if (files.length > 0) {
-                    fileInput.files = files;
-                    handleFileSelect(fileInput);
-                }
-            }
-        });
-        function toggleReports() {
-            const reportsSection = document.getElementById('reportsSection');
-            if (reportsSection.classList.contains('show')) {
-                closeReports();
-            } else {
-                showReports();
-            }
-        }
-        function showReports() {
-            const reportsSection = document.getElementById('reportsSection');
-            reportsSection.style.display = 'block';
-            setTimeout(() => reportsSection.classList.add('show'), 10);
-        }
-        function closeReports() {
-            const reportsSection = document.getElementById('reportsSection');
-            reportsSection.classList.remove('show');
-            setTimeout(() => reportsSection.style.display = 'none', 300);
-        }
-        function openReportModal() {
-            document.getElementById('reportModal').classList.add('show');
-        }
-        function closeReportModal() {
-            document.getElementById('reportModal').classList.remove('show');
-        }
-        
-        function viewRisk(id, categories, description, cause, date, isAssigned, documentPath, documentFilename) {
-            // Parse and display categories properly
-            try {
-                const parsedCategories = JSON.parse(categories);
-                if (Array.isArray(parsedCategories)) {
-                    document.getElementById('modalRiskCategory').textContent = parsedCategories.join(', ');
-                } else {
-                    document.getElementById('modalRiskCategory').textContent = categories;
-                }
-            } catch (e) {
-                document.getElementById('modalRiskCategory').textContent = categories || 'No categories specified';
-            }
-            
-            document.getElementById('modalRiskDescription').textContent = description;
-            document.getElementById('modalCauseOfRisk').textContent = cause;
-            const dateObj = new Date(date);
-            document.getElementById('modalDateSubmitted').textContent = dateObj.toLocaleDateString('en-US', {
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric'
-            });
-            
-            // Assignment status
-            const assignmentStatus = document.getElementById('modalAssignmentStatus');
-            if (assignmentStatus) {
-                if (isAssigned) {
-                    assignmentStatus.innerHTML = '<span style="color: #28a745; font-weight: 600;">✅ Assigned to Risk Owner</span><br><small style="color: #666;">Risk owner is completing the full assessment and treatment plans.</small>';
-                } else {
-                    assignmentStatus.innerHTML = '<span style="color: #ffc107; font-weight: 600;">🔄 Assignment in Progress</span><br><small style="color: #666;">System is assigning this risk to a qualified risk owner.</small>';
-                }
-            }
-            
-            const documentSection = document.getElementById('documentSection');
-            const documentLink = document.getElementById('documentLink');
-            if (documentPath && documentPath.trim() !== '') {
-                documentSection.style.display = 'block';
-                documentLink.href = documentPath;
-                
-                // Use original filename if available, otherwise extract from path
-                const filename = documentFilename && documentFilename.trim() !== '' ? documentFilename : (documentPath.split('/').pop() || 'View Document');
-                documentLink.innerHTML = `
-                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/>
-                    </svg>
-                    ${filename}
-                `;
-            } else {
-                documentSection.style.display = 'none';
-            }
-            
-            document.getElementById('riskModal').classList.add('show');
-        }
-        function closeModal() {
-            document.getElementById('riskModal').classList.remove('show');
         }
 
-        function openChatbot() {
-            const responses = [
-                "Hello! I'm here to help with risk reporting. What would you like to know?",
-                "You can report risks using the 'Report New Risk' button. Make sure to be detailed in your descriptions.",
-                "If you need help with risk categories, contact your risk owner or compliance team.",
-                "For technical issues, please contact IT support at support@airtel.africa"
-            ];
-            const message = prompt("Hi! I'm your Airtel Risk Assistant. How can I help you today?\n\n• Risk reporting guidance\n• System help\n• Contact information\n\nType your question:");
-            if (message) {
-                const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-                alert("Thank you for your question: '" + message + "'\n\n" + randomResponse + "\n\nFor more detailed assistance, please contact the compliance team.");
+        function toggleGLPISection(radio) {
+            const glpiSection = document.getElementById('glpi-ir-section');
+            const glpiInput = document.querySelector('input[name="glpi_ir_number"]');
+            
+            if (radio.value === 'yes') {
+                glpiSection.classList.add('show');
+                glpiInput.required = true;
+            } else {
+                glpiSection.classList.remove('show');
+                glpiInput.required = false;
+                glpiInput.value = '';
             }
         }
-        
+
+        function displayFileName() {
+            const fileInput = document.getElementById('fileInput');
+            const fileLabel = document.getElementById('fileLabel');
+            
+            if (fileInput.files.length > 0) {
+                fileLabel.textContent = fileInput.files[0].name;
+            } else {
+                fileLabel.textContent = 'Click to upload supporting document';
+            }
+        }
+
+        function openReportModal() {
+            document.getElementById('reportModal').classList.add('show');
+            document.getElementById('reportModal').style.display = 'flex';
+        }
+
+        function closeReportModal() {
+            document.getElementById('reportModal').classList.remove('show');
+            document.getElementById('reportModal').style.display = 'none';
+        }
+
+        function closeModal() {
+            document.getElementById('riskModal').classList.remove('show');
+            document.getElementById('riskModal').style.display = 'none';
+        }
+
         function scrollToReports() {
             const reportsSection = document.getElementById('reportsSection');
             if (reportsSection) {
-                // Show reports if hidden
-                if (!reportsSection.classList.contains('show')) {
-                    showReports();
-                }
-                // Smooth scroll to reports section
-                setTimeout(() => {
-                    reportsSection.scrollIntoView({
-                        behavior: 'smooth',
-                        block: 'start'
-                    });
-                }, 100);
+                reportsSection.scrollIntoView({ behavior: 'smooth' });
+                toggleReports();
             }
         }
-        
-        function toggleMoneyAmount() {
-            const yesRadio = document.querySelector('input[name="involves_money_loss"][value="Yes"]');
-            const moneyField = document.getElementById('money_amount_field');
-            const moneyInput = document.getElementById('money_amount');
-            
-            if (yesRadio.checked) {
-                moneyField.style.display = 'block';
-                moneyInput.required = true;
+
+        function toggleReports() {
+            const reportsSection = document.getElementById('reportsSection');
+            if (reportsSection) {
+                if (reportsSection.style.display === 'none' || reportsSection.style.display === '') {
+                    reportsSection.style.display = 'block';
+                    reportsSection.classList.add('show');
+                } else {
+                    reportsSection.style.display = 'none';
+                    reportsSection.classList.remove('show');
+                }
+            }
+        }
+
+        function closeReports() {
+            const reportsSection = document.getElementById('reportsSection');
+            if (reportsSection) {
+                reportsSection.style.display = 'none';
+                reportsSection.classList.remove('show');
+            }
+        }
+
+        function viewRisk(id, categories, description, cause, createdAt, hasOwner, documentPath, documentFilename) {
+            let parsedCategories = JSON.parse(categories);
+            let categoryDisplay = '';
+            if (Array.isArray(parsedCategories)) {
+                categoryDisplay = parsedCategories.join(', ');
             } else {
-                moneyField.style.display = 'none';
-                moneyInput.required = false;
-                moneyInput.value = '';
+                categoryDisplay = parsedCategories;
+            }
+            document.getElementById('modalRiskCategory').textContent = categoryDisplay;
+            document.getElementById('modalRiskDescription').textContent = description;
+            
+            let parsedCause = JSON.parse(cause);
+            let causeDisplay = '';
+            for (const category in parsedCause) {
+                if (parsedCause[category].length > 0) {
+                    causeDisplay += `<strong>${category}:</strong> ${parsedCause[category].join(', ')}<br>`;
+                }
+            }
+            document.getElementById('modalCauseOfRisk').innerHTML = causeDisplay || 'N/A';
+
+            document.getElementById('modalDateSubmitted').textContent = createdAt;
+            document.getElementById('modalAssignmentStatus').textContent = hasOwner ? 'Assigned to Risk Owner' : 'Pending Assignment';
+            
+            if (documentPath && documentPath !== '') {
+                document.getElementById('documentSection').style.display = 'block';
+                document.getElementById('documentLink').href = documentPath;
+                document.getElementById('documentLink').textContent = documentFilename || 'View Document';
+            } else {
+                document.getElementById('documentSection').style.display = 'none';
+            }
+            
+            document.getElementById('riskModal').classList.add('show');
+            document.getElementById('riskModal').style.display = 'flex';
+        }
+
+        function openChatbot() {
+            alert('Chatbot feature coming soon!');
+        }
+
+        // Close modals when clicking outside
+        window.onclick = function(event) {
+            const reportModal = document.getElementById('reportModal');
+            const riskModal = document.getElementById('riskModal');
+            const causeModal = document.getElementById('causeModal');
+            
+            if (event.target == reportModal) {
+                closeReportModal();
+            }
+            if (event.target == riskModal) {
+                closeModal();
+            }
+            if (event.target == causeModal) {
+                closeCauseModal();
             }
         }
     </script>

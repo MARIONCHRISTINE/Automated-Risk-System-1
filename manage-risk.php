@@ -24,7 +24,7 @@ if (!$risk_id) {
 // Get current user info
 $user = getCurrentUser();
 
-// Get comprehensive risk details, including new lock flags
+// Get comprehensive risk details
 $query = "SELECT ri.*,
                  reporter.full_name as reporter_name,
                  reporter.email as reporter_email,
@@ -54,11 +54,6 @@ if ($risk['risk_owner_id'] != $_SESSION['user_id']) {
     exit();
 }
 
-// $section_b_completed = (bool)$risk['section_b_locked'];
-// $section_c_completed = (bool)$risk['section_c_locked'];
-
-// Determine if sections are completed/locked based on new flags
-$section_b_completed = false; // Set to false since locking logic is removed
 $section_c_completed = !empty($risk['impact_category']) && !empty($risk['likelihood_level']) && !empty($risk['impact_level']);
 
 // Handle adding new treatment method
@@ -68,7 +63,7 @@ if ($_POST && isset($_POST['add_treatment'])) {
 
         $treatment_title = $_POST['treatment_title'] ?? '';
         $treatment_description = $_POST['treatment_description'] ?? '';
-        $assigned_to = $_POST['assigned_to'] ?? $_SESSION['user_id']; // Default to current user
+        $assigned_to = $_POST['assigned_to'] ?? $_SESSION['user_id'];
         $target_date = $_POST['treatment_target_date'] ?? null;
 
         if (empty($treatment_title) || empty($treatment_description)) {
@@ -85,7 +80,6 @@ if ($_POST && isset($_POST['add_treatment'])) {
         $treatment_stmt->bindParam(':title', $treatment_title);
         $treatment_stmt->bindParam(':description', $treatment_description);
         $treatment_stmt->bindParam(':assigned_to', $assigned_to);
-        // Bind target_date only if it's not empty, otherwise let DB handle NULL
         if (!empty($target_date)) {
             $treatment_stmt->bindParam(':target_date', $target_date);
         } else {
@@ -107,18 +101,15 @@ if ($_POST && isset($_POST['add_treatment'])) {
                         $file_type = $files['type'][$i];
                         $tmp_name = $files['tmp_name'][$i];
 
-                        // Generate unique filename
                         $file_extension = pathinfo($original_filename, PATHINFO_EXTENSION);
                         $unique_filename = uniqid() . '_' . time() . '.' . $file_extension;
                         $upload_path = 'uploads/treatments/' . $unique_filename;
 
-                        // Create directory if it doesn't exist
                         if (!file_exists('uploads/treatments/')) {
                             mkdir('uploads/treatments/', 0755, true);
                         }
 
                         if (move_uploaded_file($tmp_name, $upload_path)) {
-                            // Insert file record
                             $file_query = "INSERT INTO treatment_documents
                                          (treatment_id, original_filename, file_path, file_size, file_type, uploaded_at)
                                          VALUES (:treatment_id, :original_filename, :file_path, :file_size, :file_type, NOW())";
@@ -157,7 +148,6 @@ if ($_POST && isset($_POST['update_treatment'])) {
         $treatment_status = $_POST['treatment_status'] ?? '';
         $progress_notes = $_POST['progress_notes'] ?? '';
 
-        // Check if user can update this treatment (must be assigned to them or be the main risk owner)
         $check_query = "SELECT assigned_to FROM risk_treatments WHERE id = :treatment_id AND risk_id = :risk_id";
         $check_stmt = $db->prepare($check_query);
         $check_stmt->bindParam(':treatment_id', $treatment_id);
@@ -169,7 +159,6 @@ if ($_POST && isset($_POST['update_treatment'])) {
             throw new Exception("You don't have permission to update this treatment");
         }
 
-        // Update treatment
         $update_query = "UPDATE risk_treatments SET
                         status = :status,
                         progress_notes = :progress_notes,
@@ -193,18 +182,15 @@ if ($_POST && isset($_POST['update_treatment'])) {
                         $file_type = $files['type'][$i];
                         $tmp_name = $files['tmp_name'][$i];
 
-                        // Generate unique filename
                         $file_extension = pathinfo($original_filename, PATHINFO_EXTENSION);
                         $unique_filename = uniqid() . '_' . time() . '.' . $file_extension;
                         $upload_path = 'uploads/treatments/' . $unique_filename;
 
-                        // Create directory if it doesn't exist
                         if (!file_exists('uploads/treatments/')) {
                             mkdir('uploads/treatments/', 0755, true);
                         }
 
                         if (move_uploaded_file($tmp_name, $upload_path)) {
-                            // Insert file record
                             $file_query = "INSERT INTO treatment_documents
                                          (treatment_id, original_filename, file_path, file_size, file_type, uploaded_at)
                                          VALUES (:treatment_id, :original_filename, :file_path, :file_size, :file_type, NOW())";
@@ -234,114 +220,104 @@ if ($_POST && isset($_POST['update_treatment'])) {
     }
 }
 
-// Handle main risk form submission (legacy fields)
 if ($_POST && isset($_POST['update_risk'])) {
     try {
         $db->beginTransaction();
 
-        // Get form data (only risk owner sections)
-        $existing_or_new = $_POST['existing_or_new'] ?? null;
-        $risk_category = $_POST['risk_category'] ?? null;
-
+        // Get form data using correct field names that match database schema
         $risk_type = $_POST['risk_type'] ?? null;
         $impact_category = $_POST['impact_category'] ?? null;
         $likelihood_level = $_POST['likelihood_level'] ?? null;
         $impact_level = $_POST['impact_level'] ?? null;
-        $impact_description = $_POST['impact_description'] ?? null;
-
-        $treatment_action = $_POST['treatment_action'] ?? null;
-        $controls_action_plans = $_POST['controls_action_plans'] ?? null;
-        $target_completion_date = $_POST['target_completion_date'] ?? null;
-        $progress_update = $_POST['progress_update'] ?? null;
-        $treatment_status = $_POST['treatment_status'] ?? null;
-        $involves_money_loss = $_POST['involves_money_loss'] ?? null;
-        $money_amount = $_POST['money_amount'] ?? null;
-
-        $risk_rating = 0;
-        if ($likelihood_level && $impact_level) {
-            $risk_rating = $likelihood_level * $impact_level;
-        }
-
-        // Overall risk status
+        $impact_description = $_POST['impact_description_text'] ?? null;
         $risk_status = $_POST['risk_status'] ?? null;
 
-        // Calculate risk level based on the highest rating available
-        $risk_level = 'Low';
-        $max_rating = 0;
+        $additional_categories = $_POST['additional_categories'] ?? [];
+        $additional_likelihood = $_POST['additional_likelihood'] ?? [];
+        $additional_impact = $_POST['additional_impact'] ?? [];
+        $additional_ratings = $_POST['additional_ratings'] ?? [];
+        $has_additional_risks = $_POST['has_additional_risks'] ?? 'no';
 
-        if ($inherent_likelihood && $inherent_consequence) {
-            $max_rating = max($max_rating, $inherent_likelihood * $inherent_consequence);
+        // Process primary risk
+        $primary_likelihood = $_POST['likelihood'] ?? $likelihood_level;
+        $primary_impact = $_POST['impact'] ?? $impact_level;
+        
+        // Calculate risk rating
+        $risk_rating = 0;
+        if ($primary_likelihood && $primary_impact) {
+            $risk_rating = $primary_likelihood * $primary_impact;
         }
-        if ($residual_likelihood && $residual_consequence) {
-            $max_rating = max($max_rating, $residual_likelihood * $residual_consequence);
+
+        $all_categories = [];
+        $all_likelihood = [];
+        $all_impact = [];
+        $all_ratings = [];
+
+        // Add primary risk data
+        if (!empty($risk['risk_categories'])) {
+            $existing_categories = json_decode($risk['risk_categories'], true);
+            if (!empty($existing_categories[0])) {
+                $all_categories[] = $existing_categories[0];
+                $all_likelihood[] = $primary_likelihood;
+                $all_impact[] = $primary_impact;
+                $all_ratings[] = $risk_rating;
+            }
         }
 
-        if ($max_rating >= 12) $risk_level = 'Critical';
-        elseif ($max_rating >= 8) $risk_level = 'High';
-        elseif ($max_rating >= 4) $risk_level = 'Medium';
+        // Add additional risks data
+        if ($has_additional_risks === 'yes' && !empty($additional_categories)) {
+            for ($i = 0; $i < count($additional_categories); $i++) {
+                if (!empty($additional_categories[$i]) && !empty($additional_likelihood[$i]) && !empty($additional_impact[$i])) {
+                    $all_categories[] = $additional_categories[$i];
+                    $all_likelihood[] = $additional_likelihood[$i];
+                    $all_impact[] = $additional_impact[$i];
+                    $all_ratings[] = $additional_ratings[$i] ?? ($additional_likelihood[$i] * $additional_impact[$i]);
+                }
+            }
+        }
 
-        // $new_section_b_locked = $risk['section_b_locked']; // Keep current locked state by default
-        // // Lock if not already locked AND all fields are now filled
-        // if (!$new_section_b_locked &&
-        //     !empty($existing_or_new) &&
-        //     !empty($risk_category)) {
-        //     $new_section_b_locked = 1;
-        // }
+        // Convert arrays to comma-separated strings for database storage
+        $categories_json = json_encode($all_categories);
+        $likelihood_string = implode(',', $all_likelihood);
+        $impact_string = implode(',', $all_impact);
+        $ratings_string = implode(',', $all_ratings);
 
-        // $new_section_c_locked = $risk['section_c_locked']; // Keep current locked state by default
-        // // Lock if not already locked AND at least one assessment (inherent or residual) is fully filled
-        // if (!$new_section_c_locked &&
-        //     ((!empty($inherent_likelihood) && !empty($inherent_consequence)) ||
-        //      (!empty($residual_likelihood) && !empty($residual_consequence)))) {
-        //     $new_section_c_locked = 1;
-        // }
+        // Get general risk scores
+        $general_inherent_score = $_POST['general_inherent_risk_score'] ?? 0;
+        $general_residual_score = $_POST['general_residual_risk_score'] ?? 0;
 
         $update_query = "UPDATE risk_incidents SET
-                        existing_or_new = :existing_or_new,
+                        risk_type = :risk_type,
+                        impact_category = :impact_category,
+                        likelihood_level = :likelihood_level,
+                        impact_level = :impact_level,
+                        impact_description = :impact_description,
+                        risk_rating = :risk_rating,
+                        risk_status = :risk_status,
                         risk_categories = :risk_categories,
                         inherent_likelihood = :inherent_likelihood,
                         inherent_consequence = :inherent_consequence,
-                        risk_rating = :risk_rating,
-                        risk_status = :risk_status,
-                        treatment_action = :treatment_action,
-                        controls_action_plans = :controls_action_plans,
-                        target_completion_date = :target_completion_date,
-                        progress_update = :progress_update,
-                        treatment_status = :treatment_status,
-                        involves_money_loss = :involves_money_loss,
-                        money_amount = :money_amount,
+                        general_inherent_risk_score = :general_inherent_risk_score,
+                        general_residual_risk_score = :general_residual_risk_score,
+                        has_additional_risks = :has_additional_risks,
                         updated_at = NOW()
                         WHERE id = :risk_id";
 
         $update_stmt = $db->prepare($update_query);
-        $update_stmt->bindParam(':existing_or_new', $existing_or_new);
-        $update_stmt->bindParam(':risk_categories', $risk_category);
-        $update_stmt->bindParam(':inherent_likelihood', $likelihood_level);
-        $update_stmt->bindParam(':inherent_consequence', $impact_level);
+        $update_stmt->bindParam(':risk_type', $risk_type);
+        $update_stmt->bindParam(':impact_category', $impact_category);
+        $update_stmt->bindParam(':likelihood_level', $primary_likelihood);
+        $update_stmt->bindParam(':impact_level', $primary_impact);
+        $update_stmt->bindParam(':impact_description', $impact_description);
         $update_stmt->bindParam(':risk_rating', $risk_rating);
         $update_stmt->bindParam(':risk_status', $risk_status);
-        $update_stmt->bindParam(':treatment_action', $treatment_action);
-        $update_stmt->bindParam(':controls_action_plans', $controls_action_plans);
-        $update_stmt->bindParam(':target_completion_date', $target_completion_date);
-        $update_stmt->bindParam(':progress_update', $progress_update);
-        $update_stmt->bindParam(':treatment_status', $treatment_status);
-        $update_stmt->bindParam(':involves_money_loss', $involves_money_loss);
-        $update_stmt->bindParam(':money_amount', $money_amount);
+        $update_stmt->bindParam(':risk_categories', $categories_json);
+        $update_stmt->bindParam(':inherent_likelihood', $likelihood_string);
+        $update_stmt->bindParam(':inherent_consequence', $impact_string);
+        $update_stmt->bindParam(':general_inherent_risk_score', $general_inherent_score);
+        $update_stmt->bindParam(':general_residual_risk_score', $general_residual_score);
+        $update_stmt->bindParam(':has_additional_risks', $has_additional_risks);
         $update_stmt->bindParam(':risk_id', $risk_id);
-
-        if (!empty($risk_category) && !empty($_POST['category_description'])) {
-            // First, delete existing category details for this risk
-            $delete_category_stmt = $db->prepare("DELETE FROM risk_category_details WHERE risk_id = :risk_id");
-            $delete_category_stmt->bindParam(':risk_id', $risk_id);
-            $delete_category_stmt->execute();
-
-            // Insert new category details
-            $category_stmt = $db->prepare("INSERT INTO risk_category_details (risk_id, risk_category, category_description, category_type) VALUES (:risk_id, :risk_category, :category_description, 'impact_level')");
-            $category_stmt->bindParam(':risk_id', $risk_id);
-            $category_stmt->bindParam(':risk_category', $risk_category);
-            $category_stmt->bindParam(':category_description', $_POST['category_description']);
-            $category_stmt->execute();
-        }
 
         if ($update_stmt->execute()) {
             $db->commit();
@@ -384,7 +360,6 @@ if (!empty($treatments)) {
     $docs_stmt->execute($treatment_ids);
     $docs_result = $docs_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // Group by treatment_id
     foreach ($docs_result as $doc) {
         $treatment_docs[$doc['treatment_id']][] = $doc;
     }
@@ -396,19 +371,11 @@ $risk_owners_stmt = $db->prepare($risk_owners_query);
 $risk_owners_stmt->execute();
 $risk_owners = $risk_owners_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Group risk owners by department
-$risk_owners_by_dept = [];
-foreach ($risk_owners as $owner) {
-    $risk_owners_by_dept[$owner['department']][] = $owner;
-}
-
 // Get notifications using shared component
 $all_notifications = getNotifications($db, $_SESSION['user_id']);
 
-// Calculate completion percentage
 $completion_fields = [
-    'existing_or_new', 'to_be_reported_to_board', 'risk_category',
-    'inherent_likelihood', 'inherent_consequence', 'residual_likelihood', 'residual_consequence'
+    'risk_type', 'impact_category', 'likelihood_level', 'impact_level'
 ];
 
 $completed_fields = 0;
@@ -427,10 +394,10 @@ if (!empty($treatments)) {
             $completed_treatments++;
         }
     }
-    $treatment_completion = count($treatments) > 0 ? ($completed_treatments / count($treatments)) * 30 : 0; // 30% weight for treatments
+    $treatment_completion = count($treatments) > 0 ? ($completed_treatments / count($treatments)) * 30 : 0;
 }
 
-$base_completion = ($completed_fields / count($completion_fields)) * 70; // 70% weight for basic fields
+$base_completion = ($completed_fields / count($completion_fields)) * 70;
 $completion_percentage = round($base_completion + $treatment_completion);
 ?>
 <!DOCTYPE html>
@@ -568,7 +535,7 @@ $completion_percentage = round($base_completion + $treatment_completion);
             border-color: rgba(255, 255, 255, 0.5);
         }
 
-        /* Navigation Bar - Keep original styling */
+        /* Navigation Bar */
         .nav {
             background: #f8f9fa;
             border-bottom: 1px solid #dee2e6;
@@ -777,19 +744,6 @@ $completion_percentage = round($base_completion + $treatment_completion);
             margin: 0.25rem 0 0 0;
         }
 
-        .section-note {
-            background: linear-gradient(135deg, #fff3cd, #ffeaa7);
-            border: 1px solid #ffeaa7;
-            color: #856404;
-            padding: 1rem;
-            border-radius: 8px;
-            margin-bottom: 1.5rem;
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            font-size: 0.9rem;
-        }
-
         /* Enhanced Form Elements */
         .form-row {
             display: grid;
@@ -835,16 +789,6 @@ $completion_percentage = round($base_completion + $treatment_completion);
             box-shadow: 0 0 0 3px rgba(230, 0, 18, 0.1);
             transform: translateY(-1px);
         }
-        
-        /* Style for disabled inputs to look like readonly-display */
-        input[disabled], select[disabled], textarea[disabled] {
-            background: #f8f9fa;
-            color: #495057;
-            cursor: not-allowed;
-            border-color: #dee2e6;
-            box-shadow: none;
-            transform: none;
-        }
 
         textarea {
             height: 120px;
@@ -861,12 +805,6 @@ $completion_percentage = round($base_completion + $treatment_completion);
             font-weight: 500;
             min-height: 50px;
             display: flex;
-            align-items: center;
-        }
-
-        /* Enhanced Risk Assessment Matrix */
-        .risk-matrix-container {
-            background: linear-gradient(135deg, #f8f9fa, #e9ecef);
             align-items: center;
         }
 
@@ -965,83 +903,6 @@ $completion_percentage = round($base_completion + $treatment_completion);
             font-weight: 600;
             color: #17a2b8;
             margin: 0;
-        }
-
-        .treatment-status {
-            padding: 0.25rem 0.75rem;
-            border-radius: 15px;
-            font-size: 0.8rem;
-            font-weight: 600;
-        }
-
-        .status-pending { background: #fff3cd; color: #856404; }
-        .status-in-progress { background: #cce5ff; color: #004085; }
-        .status-completed { background: #d4edda; color: #155724; }
-        .status-cancelled { background: #f8d7da; color: #721c24; }
-
-        .treatment-meta {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin: 1rem 0;
-            padding: 1rem;
-            background: white;
-            border-radius: 8px;
-            border: 1px solid #dee2e6;
-        }
-
-        .meta-item {
-            display: flex;
-            flex-direction: column;
-        }
-
-        .meta-label {
-            font-size: 0.8rem;
-            color: #666;
-            font-weight: 500;
-            margin-bottom: 0.25rem;
-        }
-
-        .meta-value {
-            font-weight: 600;
-            color: #333;
-        }
-
-        .treatment-description {
-            background: white;
-            padding: 1rem;
-            border-radius: 8px;
-            border-left: 4px solid #17a2b8;
-            margin: 1rem 0;
-            line-height: 1.6;
-        }
-
-        .treatment-actions {
-            display: flex;
-            gap: 0.5rem;
-            flex-wrap: wrap;
-            margin-top: 1rem;
-        }
-
-        .add-treatment-btn {
-            background: linear-gradient(135deg, #17a2b8, #138496);
-            color: white;
-            border: none;
-            padding: 1rem 2rem;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 1rem;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            transition: all 0.3s;
-            box-shadow: 0 4px 15px rgba(23, 162, 184, 0.3);
-        }
-
-        .add-treatment-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(23, 162, 184, 0.4);
         }
 
         /* Modal Styles */
@@ -1771,7 +1632,6 @@ $completion_percentage = round($base_completion + $treatment_completion);
                     </li>
                     <li class="nav-item notification-nav-item">
                         <?php
-                        // Use shared notifications component
                         if (isset($_SESSION['user_id'])) {
                             renderNotificationBar($all_notifications);
                         }
@@ -1819,6 +1679,13 @@ $completion_percentage = round($base_completion + $treatment_completion);
                 </div>
             <?php endif; ?>
 
+            <?php if (isset($_SESSION['error_message'])): ?>
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span><?php echo htmlspecialchars($_SESSION['error_message']); unset($_SESSION['error_message']); ?></span>
+                </div>
+            <?php endif; ?>
+
             <form method="POST" enctype="multipart/form-data" id="riskForm">
                 <!-- SECTION A: RISK IDENTIFICATION (Read-only) -->
                 <div class="form-section readonly">
@@ -1831,9 +1698,6 @@ $completion_percentage = round($base_completion + $treatment_completion);
                             <p>Information provided by the risk reporter</p>
                         </div>
                     </div>
-                    <!-- Updated risk identification section to match report_risk.php structure -->
-                    <!-- Risk Basic Information -->
-
 
                     <!-- Risk Categories -->
                     <div class="form-group">
@@ -1934,16 +1798,14 @@ $completion_percentage = round($base_completion + $treatment_completion);
                     </div>
                 </div>
 
-                <!-- Removed entire SECTION B: RISK CLASSIFICATION section -->
-                
-                <!-- Changed SECTION C to SECTION B: RISK ASSESSMENT -->
+                <!-- SECTION B: RISK ASSESSMENT -->
                 <div class="form-section <?php echo $section_c_completed ? 'readonly' : ''; ?>" id="section-c">
-                    <div class="section-header <?php echo $section_c_completed ? 'readonly' : ''; ?>" style="background-color: #dc3545; color: white;">
+                    <div class="section-header <?php echo $section_c_completed ? 'readonly' : ''; ?>">
                         <div class="section-icon <?php echo $section_c_completed ? 'readonly' : ''; ?>">
                             <i class="fas fa-calculator"></i>
                         </div>
                         <div class="section-title <?php echo $section_c_completed ? 'readonly' : ''; ?>">
-                            <h3>SECTION 2: RISK ASSESSMENT</h3>
+                            <h3>SECTION B: RISK ASSESSMENT</h3>
                             <p><?php echo $section_c_completed ? 'Assessment completed - cannot be modified' : 'Evaluate risk likelihood and impact'; ?></p>
                         </div>
                         <?php if ($section_c_completed): ?>
@@ -1955,252 +1817,401 @@ $completion_percentage = round($base_completion + $treatment_completion);
                         <?php endif; ?>
                     </div>
 
-                    <?php if ($section_c_completed): ?>
-                        <!-- Updated to show new risk assessment fields from report_risk.php -->
+                    <?php 
+                    $has_assessment_data = !empty($risk['inherent_likelihood']) || !empty($risk['inherent_consequence']) || !empty($risk['risk_rating']);
+                    
+                    if ($section_c_completed || $has_assessment_data): ?>
+                        <!-- Display Mode: Show existing assessment data -->
                         <div class="assessment-grid">
-                            <div class="assessment-card">
-                                <h4><i class="fas fa-chart-line"></i> Risk Assessment Results</h4>
-                                
-                                <!-- Added risk type display for readonly mode -->
-                                <div class="form-group">
-                                    <label>Risk Type</label>
-                                    <div class="readonly-display">
-                                        <?php echo isset($risk['risk_type']) ? ucfirst(str_replace('_', ' ', $risk['risk_type'])) : 'Not specified'; ?>
-                                    </div>
+                            
+                            <!-- Risk Type Display -->
+                            <div class="form-group">
+                                <label class="form-label">a. Existing or New Risk</label>
+                                <div class="readonly-display" style="padding: 10px; background: #f8f9fa; border-radius: 4px; border-left: 4px solid #007bff;">
+                                    <?php echo isset($risk['existing_or_new']) ? ucfirst(str_replace('_', ' ', $risk['existing_or_new'])) : 'Not specified'; ?>
                                 </div>
+                            </div>
+
+                            <!-- Risk Rating Display -->
+                            <div class="form-group">
+                                <label class="form-label">b. Risk Rating</label>
                                 
-                                <div class="form-group">
-                                    <label>Impact Category</label>
-                                    <div class="readonly-display">
-                                        <?php 
-                                        $impact_categories = [
-                                            'financial' => 'Financial Exposure (Revenue, Operating Expenditure, Book value)',
-                                            'market_share' => 'Decrease in market share',
-                                            'customer' => 'Customer Experience',
-                                            'compliance' => 'Compliance',
-                                            'reputation' => 'Reputation',
-                                            'fraud' => 'Fraud',
-                                            'operations' => 'Operations (Business continuity)',
-                                            'networks' => 'Networks',
-                                            'people' => 'People',
-                                            'it_cyber' => 'IT (Cybersecurity & Data Privacy)'
-                                        ];
-                                        echo htmlspecialchars($impact_categories[isset($risk['impact_category']) ? $risk['impact_category'] : ''] ?? (isset($risk['impact_category']) ? $risk['impact_category'] : ''));
-                                        ?>
-                                    </div>
-                                </div>
+                                <?php 
+                                $risk_categories = json_decode($risk['risk_categories'] ?? '[]', true);
+                                $inherent_likelihood_values = explode(',', $risk['inherent_likelihood'] ?? '');
+                                $inherent_consequence_values = explode(',', $risk['inherent_consequence'] ?? '');
+                                $risk_rating_values = explode(',', $risk['risk_rating'] ?? '');
+                                $residual_rating_values = explode(',', $risk['residual_rating'] ?? '');
                                 
-                                <div class="form-group">
-                                    <label>Likelihood Level</label>
-                                    <div class="readonly-display">
-                                        <?php 
-                                        $likelihood_labels = [1 => 'UNLIKELY', 2 => 'POSSIBLE', 3 => 'LIKELY', 4 => 'ALMOST CERTAIN'];
-                                        echo $likelihood_labels[$risk['likelihood_level']] ?? $risk['likelihood_level'];
-                                        ?>
-                                    </div>
-                                </div>
-                                
-                                <div class="form-group">
-                                    <label>Impact Level</label>
-                                    <div class="readonly-display">
-                                        <?php 
-                                        $impact_labels = [1 => 'MINOR', 2 => 'MODERATE', 3 => 'SIGNIFICANT', 4 => 'EXTREME'];
-                                        echo $impact_labels[$risk['impact_level']] ?? $risk['impact_level'];
-                                        ?>
-                                    </div>
-                                </div>
-                                
-                                <div class="form-group">
-                                    <label>Risk Rating</label>
-                                    <div class="readonly-display">
-                                        <?php 
-                                        $rating = $risk['risk_rating'];
-                                        $level = 'Low';
-                                        $color = '#28a745';
+                                // Display primary risk (i.)
+                                if (!empty($risk_categories)): ?>
+                                    <div style="margin: 15px 0; padding: 15px; background: #f8f9fa; border-left: 4px solid #E60012; border-radius: 4px;">
+                                        <h4 style="margin: 0 0 15px 0; color: #E60012; font-size: 16px;">i. <?php echo htmlspecialchars($risk_categories[0]); ?></h4>
                                         
-                                        if ($rating >= 12) {
-                                            $level = 'Critical';
-                                            $color = '#dc3545';
-                                        } elseif ($rating >= 8) {
-                                            $level = 'High';
-                                            $color = '#fd7e14';
-                                        } elseif ($rating >= 4) {
-                                            $level = 'Medium';
-                                            $color = '#ffc107';
-                                        }
-                                        ?>
-                                        <span style="background: <?php echo $color; ?>; color: white; padding: 0.5rem 1rem; border-radius: 15px; font-weight: bold;">
-                                            <?php echo $rating; ?> - <?php echo $level; ?>
-                                        </span>
+                                        <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                                            <!-- Inherent Risk Display -->
+                                            <div style="flex: 1; min-width: 200px; padding: 15px; background: #e8f5e8; border: 2px solid #28a745; border-radius: 8px;">
+                                                <h6 style="color: #28a745; margin-bottom: 10px;">Inherent Risk</h6>
+                                                <div style="margin-bottom: 8px;">
+                                                    <strong>Likelihood:</strong> <?php echo $inherent_likelihood_values[0] ?? 'N/A'; ?>
+                                                </div>
+                                                <div style="margin-bottom: 8px;">
+                                                    <strong>Impact:</strong> <?php echo $inherent_consequence_values[0] ?? 'N/A'; ?>
+                                                </div>
+                                                <div>
+                                                    <strong>Rating:</strong> 
+                                                    <?php 
+                                                    $rating = $risk_rating_values[0] ?? 0;
+                                                    $level = 'Low';
+                                                    $color = '#28a745';
+                                                    
+                                                    if ($rating >= 12) {
+                                                        $level = 'Critical';
+                                                        $color = '#dc3545';
+                                                    } elseif ($rating >= 8) {
+                                                        $level = 'High';
+                                                        $color = '#fd7e14';
+                                                    } elseif ($rating >= 4) {
+                                                        $level = 'Medium';
+                                                        $color = '#ffc107';
+                                                    }
+                                                    ?>
+                                                    <span style="background: <?php echo $color; ?>; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;">
+                                                        <?php echo $rating; ?> - <?php echo $level; ?>
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            
+                                            <!-- Residual Risk Display -->
+                                            <div style="flex: 1; min-width: 200px; padding: 15px; background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px;">
+                                                <h6 style="color: #856404; margin-bottom: 10px;">Residual Risk</h6>
+                                                <div>
+                                                    <strong>Rating:</strong> 
+                                                    <?php 
+                                                    $residual_rating = $residual_rating_values[0] ?? 0;
+                                                    if ($residual_rating > 0):
+                                                        $res_level = 'Low';
+                                                        $res_color = '#28a745';
+                                                        
+                                                        if ($residual_rating >= 12) {
+                                                            $res_level = 'Critical';
+                                                            $res_color = '#dc3545';
+                                                        } elseif ($residual_rating >= 8) {
+                                                            $res_level = 'High';
+                                                            $res_color = '#fd7e14';
+                                                        } elseif ($residual_rating >= 4) {
+                                                            $res_level = 'Medium';
+                                                            $res_color = '#ffc107';
+                                                        }
+                                                    ?>
+                                                        <span style="background: <?php echo $res_color; ?>; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;">
+                                                            <?php echo $residual_rating; ?> - <?php echo $res_level; ?>
+                                                        </span>
+                                                    <?php else: ?>
+                                                        <span style="color: #666;">Not assessed</span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                <?php endif;
+                                
+                                for ($i = 1; $i < count($risk_categories); $i++): 
+                                    $roman_numerals = ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x'];
+                                    $numeral = $roman_numerals[$i] ?? ($i + 1);
+                                ?>
+                                    <div style="margin: 15px 0; padding: 15px; background: #f8f9fa; border-left: 4px solid #6f42c1; border-radius: 4px;">
+                                        <h4 style="margin: 0 0 15px 0; color: #6f42c1; font-size: 16px;"><?php echo $numeral; ?>. <?php echo htmlspecialchars($risk_categories[$i]); ?></h4>
+                                        
+                                        <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                                            <!-- Secondary Inherent Risk Display -->
+                                            <div style="flex: 1; min-width: 200px; padding: 15px; background: #e8f5e8; border: 2px solid #28a745; border-radius: 8px;">
+                                                <h6 style="color: #28a745; margin-bottom: 10px;">Inherent Risk</h6>
+                                                <div style="margin-bottom: 8px;">
+                                                    <strong>Likelihood:</strong> <?php echo $inherent_likelihood_values[$i] ?? 'N/A'; ?>
+                                                </div>
+                                                <div style="margin-bottom: 8px;">
+                                                    <strong>Impact:</strong> <?php echo $inherent_consequence_values[$i] ?? 'N/A'; ?>
+                                                </div>
+                                                <div>
+                                                    <strong>Rating:</strong> 
+                                                    <?php 
+                                                    $sec_rating = $risk_rating_values[$i] ?? 0;
+                                                    $sec_level = 'Low';
+                                                    $sec_color = '#28a745';
+                                                    
+                                                    if ($sec_rating >= 12) {
+                                                        $sec_level = 'Critical';
+                                                        $sec_color = '#dc3545';
+                                                    } elseif ($sec_rating >= 8) {
+                                                        $sec_level = 'High';
+                                                        $sec_color = '#fd7e14';
+                                                    } elseif ($sec_rating >= 4) {
+                                                        $sec_level = 'Medium';
+                                                        $sec_color = '#ffc107';
+                                                    }
+                                                    ?>
+                                                    <span style="background: <?php echo $sec_color; ?>; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;">
+                                                        <?php echo $sec_rating; ?> - <?php echo $sec_level; ?>
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            
+                                            <!-- Secondary Residual Risk Display -->
+                                            <div style="flex: 1; min-width: 200px; padding: 15px; background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px;">
+                                                <h6 style="color: #856404; margin-bottom: 10px;">Residual Risk</h6>
+                                                <div>
+                                                    <strong>Rating:</strong> 
+                                                    <?php 
+                                                    $sec_residual = $residual_rating_values[$i] ?? 0;
+                                                    if ($sec_residual > 0):
+                                                        $sec_res_level = 'Low';
+                                                        $sec_res_color = '#28a745';
+                                                        
+                                                        if ($sec_residual >= 12) {
+                                                            $sec_res_level = 'Critical';
+                                                            $sec_res_color = '#dc3545';
+                                                        } elseif ($sec_residual >= 8) {
+                                                            $sec_res_level = 'High';
+                                                            $sec_res_color = '#fd7e14';
+                                                        } elseif ($sec_residual >= 4) {
+                                                            $sec_res_level = 'Medium';
+                                                            $sec_res_color = '#ffc107';
+                                                        }
+                                                    ?>
+                                                        <span style="background: <?php echo $sec_res_color; ?>; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;">
+                                                            <?php echo $sec_residual; ?> - <?php echo $sec_res_level; ?>
+                                                        </span>
+                                                    <?php else: ?>
+                                                        <span style="color: #666;">Not assessed</span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                <?php endfor; ?>
+                            </div>
+
+                            <!-- General Risk Score Display -->
+                            <div class="form-group">
+                                <label class="form-label">c. General Risk Score</label>
+                                
+                                <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 15px;">
+                                    <div style="flex: 1; min-width: 250px; padding: 20px; background: #e3f2fd; border: 2px solid #2196f3; border-radius: 8px; text-align: center;">
+                                        <h6 style="color: #1976d2; margin-bottom: 10px; font-weight: 600;">General Inherent Risk Score</h6>
+                                        <div style="font-size: 24px; font-weight: bold; color: #1976d2;">
+                                            <?php echo number_format($risk['general_inherent_risk_score'] ?? 0, 2); ?>
+                                        </div>
+                                    </div>
+                                    
+                                    <div style="flex: 1; min-width: 250px; padding: 20px; background: #ffebee; border: 2px solid #f44336; border-radius: 8px; text-align: center;">
+                                        <h6 style="color: #d32f2f; margin-bottom: 10px; font-weight: 600;">General Residual Risk Score</h6>
+                                        <div style="font-size: 24px; font-weight: bold; color: #d32f2f;">
+                                            <?php echo number_format($risk['general_residual_risk_score'] ?? 0, 2); ?>
+                                        </div>
                                     </div>
                                 </div>
-                                
-                                <?php if (!empty($risk['impact_description'])): ?>
-                                <div class="form-group">
-                                    <label>Impact Description</label>
-                                    <div class="readonly-display"><?php echo htmlspecialchars($risk['impact_description']); ?></div>
-                                </div>
-                                <?php endif; ?>
                             </div>
                         </div>
                     <?php else: ?>
-                        <!-- Added risk type dropdown at the top -->
-                        <div class="form-group" style="margin-bottom: 30px;">
-                            <label class="form-label">Existing or New Risk *</label>
-                            <select id="risk_type" name="risk_type" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 16px;" required>
+                        <!-- Replaced entire input mode with exact Section B code from report_risk.php -->
+                        
+                        <!-- Section 2a: Risk Classification -->
+                        <div class="form-group">
+                            <label class="form-label">a. Existing or New Risk</label>
+                            <select name="existing_or_new" id="existing_or_new" class="form-control" required>
                                 <option value="">Select Type</option>
-                                <option value="existing" <?php echo (isset($risk['risk_type']) && $risk['risk_type'] == 'existing') ? 'selected' : ''; ?>>Existing Risk</option>
-                                <option value="new" <?php echo (isset($risk['risk_type']) && $risk['risk_type'] == 'new') ? 'selected' : ''; ?>>New Risk</option>
+                                <option value="existing" <?php echo (isset($risk['existing_or_new']) && $risk['existing_or_new'] == 'existing') ? 'selected' : ''; ?>>Existing Risk</option>
+                                <option value="new" <?php echo (isset($risk['existing_or_new']) && $risk['existing_or_new'] == 'new') ? 'selected' : ''; ?>>New Risk</option>
                             </select>
                         </div>
 
-                        <!-- Updated to match new risk assessment form from report_risk.php -->
-                        <div class="matrix-title" style="text-align: center; font-size: 18px; font-weight: bold; margin-bottom: 20px;">Risk Rating</div>
-                        
-                        <div style="display: flex; gap: 20px; flex-wrap: wrap;">
-                            <!-- Likelihood Selection -->
-                            <div style="flex: 1; min-width: 300px;">
-                                <div class="form-group">
-                                    <label class="form-label">Likelihood *</label>
-                                    <div class="likelihood-boxes" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
-                                        
-                                        <div class="likelihood-box" 
-                                             style="background-color: #ff4444; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid <?php echo ($risk['likelihood_level'] == 4) ? '#333' : 'transparent'; ?>; text-align: center; font-weight: bold;"
-                                             onclick="selectLikelihood(this, 4)"
-                                             data-value="4">
-                                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">ALMOST CERTAIN</div>
-                                            <div style="font-size: 12px; line-height: 1.3;">
-                                                1. Guaranteed to happen<br>
-                                                2. Has been happening<br>
-                                                3. Continues to happen
-                                            </div>
-                                        </div>
-                                        
-                                        <div class="likelihood-box" 
-                                             style="background-color: #ff8800; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid <?php echo ($risk['likelihood_level'] == 3) ? '#333' : 'transparent'; ?>; text-align: center; font-weight: bold;"
-                                             onclick="selectLikelihood(this, 3)"
-                                             data-value="3">
-                                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">LIKELY</div>
-                                            <div style="font-size: 12px; line-height: 1.3;">
-                                                A history of happening at certain intervals/seasons/events
-                                            </div>
-                                        </div>
-                                        
-                                        <div class="likelihood-box" 
-                                             style="background-color: #ffdd00; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid <?php echo ($risk['likelihood_level'] == 2) ? '#333' : 'transparent'; ?>; text-align: center; font-weight: bold;"
-                                             onclick="selectLikelihood(this, 2)"
-                                             data-value="2">
-                                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">POSSIBLE</div>
-                                            <div style="font-size: 12px; line-height: 1.3;">
-                                                1. More than 1 year from last occurrence<br>
-                                                2. Circumstances indicating or allowing possibility of happening
-                                            </div>
-                                        </div>
-                                        
-                                        <div class="likelihood-box" 
-                                             style="background-color: #88dd88; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid <?php echo ($risk['likelihood_level'] == 1) ? '#333' : 'transparent'; ?>; text-align: center; font-weight: bold;"
-                                             onclick="selectLikelihood(this, 1)"
-                                             data-value="1">
-                                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">UNLIKELY</div>
-                                            <div style="font-size: 12px; line-height: 1.3;">
-                                                1. Not occurred before<br>
-                                                2. This is the first time its happening<br>
-                                                3. Not expected to happen for sometime
-                                            </div>
-                                        </div>
-                                        
-                                    </div>
-                                    <input type="hidden" name="likelihood_level" id="likelihood_value" value="<?php echo htmlspecialchars($risk['likelihood_level']); ?>" required>
-                                </div>
+                        <!-- Section 2b: Risk Rating -->
+                        <div class="form-group">
+                            <label class="form-label">b. Risk Rating</label>
+                            
+                            <!-- Dynamic risk category header -->
+                            <div style="margin: 15px 0; padding: 10px; background: #f8f9fa; border-left: 4px solid #E60012; border-radius: 4px;">
+                                <h4 style="margin: 0; color: #E60012; font-size: 16px;">
+                                    Risk i. <span id="primary_risk_category_display"><?php echo !empty($risk['risk_categories']) ? json_decode($risk['risk_categories'], true)[0] : 'Select Risk Category from Section A'; ?></span>
+                                </h4>
                             </div>
                             
-                            <!-- Impact Selection -->
-                            <div style="flex: 1; min-width: 300px;">
-                                <div class="form-group">
-                                    <label class="form-label">Impact *</label>
+                            <!-- Inherent Risk Assessment -->
+                            <div style="margin: 20px 0; padding: 20px; background: #fff; border: 2px solid #28a745; border-radius: 8px;">
+                                <h5 style="color: #28a745; margin-bottom: 15px; font-weight: 600;">Inherent Risk</h5>
+                                
+                                <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                                    <!-- Likelihood Selection -->
+                                    <div style="flex: 1; min-width: 300px;">
+                                        <div class="form-group">
+                                            <label class="form-label">Likelihood *</label>
+                                            <div class="likelihood-boxes" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
+                                                
+                                                <div class="likelihood-box" 
+                                                     style="background-color: #ff4444; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                                                     onclick="selectLikelihood(this, 4)"
+                                                     data-value="4">
+                                                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">ALMOST CERTAIN</div>
+                                                    <div style="font-size: 12px; line-height: 1.3;">
+                                                        1. Guaranteed to happen<br>
+                                                        2. Has been happening<br>
+                                                        3. Continues to happen
+                                                    </div>
+                                                </div>
+                                                
+                                                <div class="likelihood-box" 
+                                                     style="background-color: #ff8800; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                                                     onclick="selectLikelihood(this, 3)"
+                                                     data-value="3">
+                                                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">LIKELY</div>
+                                                    <div style="font-size: 12px; line-height: 1.3;">
+                                                        A history of happening at certain intervals/seasons/events
+                                                    </div>
+                                                </div>
+                                                
+                                                <div class="likelihood-box" 
+                                                     style="background-color: #ffdd00; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                                                     onclick="selectLikelihood(this, 2)"
+                                                     data-value="2">
+                                                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">POSSIBLE</div>
+                                                    <div style="font-size: 12px; line-height: 1.3;">
+                                                        1. More than 1 year from last occurrence<br>
+                                                        2. Circumstances indicating or allowing possibility of happening
+                                                    </div>
+                                                </div>
+                                                
+                                                <div class="likelihood-box" 
+                                                     style="background-color: #88dd88; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                                                     onclick="selectLikelihood(this, 1)"
+                                                     data-value="1">
+                                                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">UNLIKELY</div>
+                                                    <div style="font-size: 12px; line-height: 1.3;">
+                                                        1. Not occurred before<br>
+                                                        2. This is the first time its happening<br>
+                                                        3. Not expected to happen for sometime
+                                                    </div>
+                                                </div>
+                                                
+                                            </div>
+                                            <input type="hidden" name="likelihood" id="likelihood_value" required>
+                                        </div>
+                                    </div>
                                     
-                                <div class="form-group" style="margin-bottom: 15px;">
-                                    <label class="form-label" style="font-size: 14px; margin-bottom: 8px;">Select Impact Category:</label>
-                                    <select id="impact_category" name="impact_category" onchange="updateImpactBoxes()" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;" required>
-                                        <option value="">-- Select Category --</option>
-                                        <!-- Fixed undefined index errors by adding isset() checks -->
-                                        <option value="financial" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'financial') ? 'selected' : ''; ?>>Financial Exposure (Revenue, Operating Expenditure, Book value)</option>
-                                        <option value="market_share" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'market_share') ? 'selected' : ''; ?>>Decrease in market share</option>
-                                        <option value="customer" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'customer') ? 'selected' : ''; ?>>Customer Experience</option>
-                                        <option value="compliance" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'compliance') ? 'selected' : ''; ?>>Compliance</option>
-                                        <option value="reputation" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'reputation') ? 'selected' : ''; ?>>Reputation</option>
-                                        <option value="fraud" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'fraud') ? 'selected' : ''; ?>>Fraud</option>
-                                        <option value="operations" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'operations') ? 'selected' : ''; ?>>Operations (Business continuity)</option>
-                                        <option value="networks" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'networks') ? 'selected' : ''; ?>>Networks</option>
-                                        <option value="people" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'people') ? 'selected' : ''; ?>>People</option>
-                                        <option value="it_cyber" <?php echo (isset($risk['impact_category']) && $risk['impact_category'] == 'it_cyber') ? 'selected' : ''; ?>>IT (Cybersecurity & Data Privacy)</option>
-                                    </select>
+                                    <!-- Impact Selection -->
+                                    <div style="flex: 1; min-width: 300px;">
+                                        <div class="form-group">
+                                            <label class="form-label">Impact *</label>
+                                            <div class="impact-boxes" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
+                                                
+                                                <div class="impact-box" id="extreme_box"
+                                                     style="background-color: #ff4444; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                                                     onclick="selectImpact(this, 4)"
+                                                     data-value="4">
+                                                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">EXTREME</div>
+                                                    <div id="extreme_text" style="font-size: 12px; line-height: 1.3;"></div>
+                                                </div>
+                                                
+                                                <div class="impact-box" id="significant_box"
+                                                     style="background-color: #ff8800; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                                                     onclick="selectImpact(this, 3)"
+                                                     data-value="3">
+                                                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">SIGNIFICANT</div>
+                                                    <div id="significant_text" style="font-size: 12px; line-height: 1.3;"></div>
+                                                </div>
+                                                
+                                                <div class="impact-box" id="moderate_box"
+                                                     style="background-color: #ffdd00; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                                                     onclick="selectImpact(this, 2)"
+                                                     data-value="2">
+                                                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">MODERATE</div>
+                                                    <div id="moderate_text" style="font-size: 12px; line-height: 1.3;"></div>
+                                                </div>
+                                                
+                                                <div class="impact-box" id="minor_box"
+                                                     style="background-color: #88dd88; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                                                     onclick="selectImpact(this, 1)"
+                                                     data-value="1">
+                                                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">MINOR</div>
+                                                    <div id="minor_text" style="font-size: 12px; line-height: 1.3;"></div>
+                                                </div>
+                                                
+                                            </div>
+                                            <input type="hidden" name="impact" id="impact_value" required>
+                                        </div>
+                                    </div>
                                 </div>
                                 
-                                <div class="impact-boxes" id="impact_boxes_container" style="display: <?php echo (isset($risk['impact_category']) && !empty($risk['impact_category'])) ? 'grid' : 'none'; ?>; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
-                                        
-                                        <div class="impact-box" id="extreme_box"
-                                             style="background-color: #ff4444; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid <?php echo ($risk['impact_level'] == 4) ? '#333' : 'transparent'; ?>; text-align: center; font-weight: bold;"
-                                             onclick="selectImpact(this, 4)"
-                                             data-value="4">
-                                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">EXTREME</div>
-                                            <div id="extreme_text" style="font-size: 12px; line-height: 1.3;"></div>
-                                        </div>
-                                        
-                                        <div class="impact-box" id="significant_box"
-                                             style="background-color: #ff8800; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid <?php echo ($risk['impact_level'] == 3) ? '#333' : 'transparent'; ?>; text-align: center; font-weight: bold;"
-                                             onclick="selectImpact(this, 3)"
-                                             data-value="3">
-                                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">SIGNIFICANT</div>
-                                            <div id="significant_text" style="font-size: 12px; line-height: 1.3;"></div>
-                                        </div>
-                                        
-                                        <div class="impact-box" id="moderate_box"
-                                             style="background-color: #ffdd00; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid <?php echo ($risk['impact_level'] == 2) ? '#333' : 'transparent'; ?>; text-align: center; font-weight: bold;"
-                                             onclick="selectImpact(this, 2)"
-                                             data-value="2">
-                                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">MODERATE</div>
-                                            <div id="moderate_text" style="font-size: 12px; line-height: 1.3;"></div>
-                                        </div>
-                                        
-                                        <div class="impact-box" id="minor_box"
-                                             style="background-color: #88dd88; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid <?php echo ($risk['impact_level'] == 1) ? '#333' : 'transparent'; ?>; text-align: center; font-weight: bold;"
-                                             onclick="selectImpact(this, 1)"
-                                             data-value="1">
-                                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">MINOR</div>
-                                            <div id="minor_text" style="font-size: 12px; line-height: 1.3;"></div>
-                                        </div>
-                                        
-                                    </div>
-                                    <input type="hidden" name="impact_level" id="impact_value" value="<?php echo htmlspecialchars($risk['impact_level']); ?>" required>
-                                    <input type="hidden" name="impact_description" id="impact_description_value" value="<?php echo htmlspecialchars($risk['impact_description']); ?>">
+                                <div id="inherent_rating_result" style="margin-top: 15px; padding: 15px; background: #fd7e14; color: white; border-radius: 8px; text-align: center; font-weight: bold; font-size: 16px;">
+                                    Inherent Risk Rating will appear here
                                 </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Added Impact Description section and Risk Rating side by side -->
-                        <div style="display: flex; gap: 20px; margin-top: 30px; flex-wrap: wrap;">
-                            <!-- Impact Description -->
-                            <div style="flex: 1; min-width: 300px;">
-                                <div class="form-group">
-                                    <label class="form-label">Impact Description</label>
-                                    <textarea id="impact_description_text" name="impact_description_text" 
-                                              style="width: 100%; height: 120px; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; resize: vertical;"
-                                              placeholder="Describe the impact of the risk"><?php echo htmlspecialchars($risk['impact_description'] ?? ''); ?></textarea>
-                                </div>
+                                <input type="hidden" name="risk_rating" id="risk_rating_value">
+                                <input type="hidden" name="inherent_risk_level" id="inherent_risk_level_value">
                             </div>
                             
-                            <!-- Risk Rating Display -->
-                            <div style="flex: 1; min-width: 300px;">
-                                <div id="risk_rating_display" style="text-align: center; padding: 20px; border: 2px solid #ddd; border-radius: 10px; background: #f8f9fa; height: fit-content;">
-                                    <h4>Rating will appear here</h4>
-                                    <div id="rating_result"></div>
+                            <!-- Residual Risk Section -->
+                            <div style="margin: 20px 0; padding: 20px; background: #fff; border: 2px solid #ffc107; border-radius: 8px;">
+                                <h5 style="color: #ffc107; margin-bottom: 15px; font-weight: 600;">Residual Risk</h5>
+                                <!-- Updated residual risk display to match inherent risk styling -->
+                                <div id="residual_rating_result" style="padding: 15px; background: #fd7e14; color: white; border-radius: 8px; text-align: center; font-weight: bold; font-size: 16px;">
+                                    Residual Risk Rating will appear here
+                                </div>
+                                <input type="hidden" name="residual_rating" id="residual_rating_value">
+                                <input type="hidden" name="residual_risk_level" id="residual_risk_level_value">
+                                <input type="hidden" name="control_assessment" id="control_assessment_value">
+                            </div>
+                            
+                            <!-- Additional Risk Assessment -->
+                            <div style="margin: 20px 0; padding: 20px; background: #fff; border: 2px solid #6f42c1; border-radius: 8px;">
+                                <h5 style="color: #6f42c1; margin-bottom: 15px; font-weight: 600;">Additional Risk Assessment</h5>
+                                
+                                <div style="margin-bottom: 15px;">
+                                    <p style="margin: 0 0 10px 0; color: #666; font-size: 14px;">
+                                        Is there any other triggered risk? <span style="color: red;">*</span>
+                                    </p>
+                                    <div>
+                                        <label style="margin-right: 15px; font-weight: normal;">
+                                            <input type="radio" name="has_additional_risks" value="yes" style="margin-right: 5px;" onchange="toggleAdditionalRisks(true)"> Yes
+                                        </label>
+                                        <label style="font-weight: normal;">
+                                            <input type="radio" name="has_additional_risks" value="no" style="margin-right: 5px;" onchange="toggleAdditionalRisks(false)"> No
+                                        </label>
+                                    </div>
+                                </div>
+                                
+                                <div id="additional_risks_container" style="display: none;">
+                                    <!-- Additional risks will be dynamically added here -->
+                                </div>
+                                
+                                <button type="button" id="add_risk_btn" onclick="addAdditionalRisk()" 
+                                        style="display: none; background: #6f42c1; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-top: 15px;">
+                                    <i class="fas fa-plus"></i> Add Risk
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Section 2c: General Risk Score -->
+                        <div class="form-group">
+                            <label class="form-label">c. GENERAL RISK SCORE</label>
+                            
+                            <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 15px;">
+                                <div style="flex: 1; min-width: 250px; padding: 20px; background: #e3f2fd; border: 2px solid #2196f3; border-radius: 8px; text-align: center;">
+                                    <h6 style="color: #1976d2; margin-bottom: 10px; font-weight: 600;">General Inherent Risk Score</h6>
+                                    <div id="general_inherent_score" style="font-size: 24px; font-weight: bold; color: #1976d2;">0.00</div>
+                                    <div style="font-size: 12px; color: #666; margin-top: 5px;">General Inherent Risk Score will appear here</div>
+                                    <input type="hidden" name="general_inherent_risk_score" id="general_inherent_risk_score_value">
+                                </div>
+                                
+                                <div style="flex: 1; min-width: 250px; padding: 20px; background: #ffebee; border: 2px solid #f44336; border-radius: 8px; text-align: center;">
+                                    <h6 style="color: #d32f2f; margin-bottom: 10px; font-weight: 600;">General Residual Risk Score</h6>
+                                    <div id="general_residual_score" style="font-size: 24px; font-weight: bold; color: #d32f2f;">0.00</div>
+                                    <div style="font-size: 12px; color: #666; margin-top: 5px;">General Residual Risk Score will appear here</div>
+                                    <input type="hidden" name="general_residual_risk_score" id="general_residual_risk_score_value">
                                 </div>
                             </div>
                         </div>
                         
                     <?php endif; ?>
-                </div>
 
                 <!-- Overall Risk Status -->
                 <div class="form-section">
@@ -2218,10 +2229,10 @@ $completion_percentage = round($base_completion + $treatment_completion);
                         <label for="risk_status">Overall Risk Status</label>
                         <select id="risk_status" name="risk_status" class="form-control">
                             <option value="">Select Status...</option>
-                            <option value="pending" <?php echo ($risk['risk_status'] == 'pending') ? 'selected' : ''; ?>>Open</option>
-                            <option value="in_progress" <?php echo ($risk['risk_status'] == 'in_progress') ? 'selected' : ''; ?>>In Progress</option>
-                            <option value="completed" <?php echo ($risk['risk_status'] == 'completed') ? 'selected' : ''; ?>>Completed</option>
-                            <option value="cancelled" <?php echo ($risk['risk_status'] == 'cancelled') ? 'selected' : ''; ?>>Cancelled</option>
+                            <option value="pending" <?php echo (isset($risk['risk_status']) && $risk['risk_status'] == 'pending') ? 'selected' : ''; ?>>Open</option>
+                            <option value="in_progress" <?php echo (isset($risk['risk_status']) && $risk['risk_status'] == 'in_progress') ? 'selected' : ''; ?>>In Progress</option>
+                            <option value="completed" <?php echo (isset($risk['risk_status']) && $risk['risk_status'] == 'completed') ? 'selected' : ''; ?>>Completed</option>
+                            <option value="cancelled" <?php echo (isset($risk['risk_status']) && $risk['risk_status'] == 'cancelled') ? 'selected' : ''; ?>>Cancelled</option>
                         </select>
                     </div>
                 </div>
@@ -2236,6 +2247,7 @@ $completion_percentage = round($base_completion + $treatment_completion);
                     </a>
                 </div>
             </form>
+
 
             <!-- SECTION D: TREATMENT METHODS -->
             <div class="treatments-section">
@@ -2477,7 +2489,6 @@ $completion_percentage = round($base_completion + $treatment_completion);
     </div>
 
     <script>
-        // Risk owners data for user search
         const riskOwners = <?php echo json_encode($risk_owners); ?>;
 
         // Enhanced file upload handling
@@ -2509,7 +2520,6 @@ $completion_percentage = round($base_completion + $treatment_completion);
                             <small style="color: #999;">Total size: ${totalSizeMB} MB • Click to change files</small>
                         `;
 
-                        // Add success animation
                         uploadArea.style.transform = 'scale(1.02)';
                         setTimeout(() => {
                             uploadArea.style.transform = 'scale(1)';
@@ -2539,11 +2549,14 @@ $completion_percentage = round($base_completion + $treatment_completion);
                     const fileInput = this.querySelector('input[type="file"]');
                     fileInput.files = e.dataTransfer.files;
 
-                    // Trigger change event
                     const event = new Event('change', { bubbles: true });
                     fileInput.dispatchEvent(event);
                 });
             });
+
+            // Initialize impact boxes and risk rating on page load
+            updateImpactBoxes();
+            calculateRiskRating();
         });
 
         // User search functionality
@@ -2612,27 +2625,23 @@ $completion_percentage = round($base_completion + $treatment_completion);
         }
 
         function reassignTreatment(treatmentId) {
-            // This would open a reassignment modal - simplified for now
             alert('Reassignment feature coming soon!');
         }
 
-        // Update form validation to handle read-only sections
         document.getElementById('riskForm').addEventListener('submit', function(e) {
             const requiredFields = [];
 
-            // Only validate editable sections
-            <?php if (!$section_b_completed): ?>
-            requiredFields.push('existing_or_new', 'risk_category');
+            <?php if (!$section_c_completed): ?>
+            requiredFields.push('risk_type', 'impact_category', 'likelihood_level', 'impact_level');
             <?php endif; ?>
 
             let hasError = false;
             let firstErrorField = null;
 
-            // Remove previous error states
             document.querySelectorAll('.error').forEach(el => el.classList.remove('error'));
 
             requiredFields.forEach(fieldName => {
-                const field = document.querySelector(`[name="${fieldName}"]:not([disabled])`); // Only validate non-disabled fields
+                const field = document.querySelector(`[name="${fieldName}"]`);
                 if (field && !field.value) {
                     field.style.borderColor = '#dc3545';
                     field.style.boxShadow = '0 0 0 3px rgba(220, 53, 69, 0.1)';
@@ -2640,15 +2649,14 @@ $completion_percentage = round($base_completion + $treatment_completion);
                     hasError = true;
                     if (!firstErrorField) firstErrorField = field;
                 } else if (field) {
-                    field.style.borderColor = ''; // Reset to default
-                    field.style.boxShadow = ''; // Reset to default
+                    field.style.borderColor = '';
+                    field.style.boxShadow = '';
                 }
             });
 
             if (hasError) {
                 e.preventDefault();
 
-                // Show error message
                 const errorAlert = document.createElement('div');
                 errorAlert.className = 'alert alert-danger';
                 errorAlert.innerHTML = `
@@ -2656,15 +2664,12 @@ $completion_percentage = round($base_completion + $treatment_completion);
                     <span>Please fill in all required fields in the editable sections.</span>
                 `;
 
-                // Insert error message at top of form
                 const form = document.getElementById('riskForm');
                 form.insertBefore(errorAlert, form.firstChild);
 
-                // Scroll to first error field
                 firstErrorField.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 firstErrorField.focus();
 
-                // Remove error message after 5 seconds
                 setTimeout(() => {
                     errorAlert.remove();
                 }, 5000);
@@ -2672,151 +2677,33 @@ $completion_percentage = round($base_completion + $treatment_completion);
                 return false;
             }
 
-            // Show loading state
             const submitBtn = document.getElementById('submitBtn');
             const originalText = submitBtn.innerHTML;
             submitBtn.innerHTML = '<i class="fas fa-spinner spinner"></i> Updating Risk...';
             submitBtn.disabled = true;
             submitBtn.style.opacity = '0.7';
 
-            // Add loading class to form
             document.getElementById('riskForm').classList.add('loading');
         });
 
-        // Enhanced auto-calculate risk ratings with animations
-        function calculateRisk(likelihoodId, consequenceId, displayId) {
-            const likelihood = document.getElementById(likelihoodId);
-            const consequence = document.getElementById(consequenceId);
-
-            if (likelihood && consequence) {
-                // Only add event listeners if the fields are NOT disabled
-                if (!likelihood.disabled) {
-                    likelihood.addEventListener('change', updateRating);
-                }
-                if (!consequence.disabled) {
-                    consequence.addEventListener('change', updateRating);
-                }
-
-                // Initial calculation
-                updateRating();
-
-                function updateRating() {
-                    const l = parseInt(likelihood.value) || 0;
-                    const c = parseInt(consequence.value) || 0;
-                    const rating = l * c;
-
-                    let ratingDisplay = document.getElementById(displayId);
-                    if (!ratingDisplay) {
-                        ratingDisplay = document.createElement('div');
-                        ratingDisplay.id = displayId;
-                        ratingDisplay.className = 'risk-rating-display';
-                        // Append to the parent of the consequence select
-                        consequence.closest('.assessment-card').appendChild(ratingDisplay);
-                    }
-
-                    if (rating > 0 && !isNaN(rating) && l > 0 && c > 0) {
-                        let level = 'Low';
-                        let color = '#28a745';
-                        let bgColor = 'linear-gradient(135deg, #d4edda, #c3e6cb)';
-                        let textColor = '#155724';
-
-                        if (rating >= 12) {
-                            level = 'Critical';
-                            color = '#dc3545';
-                            bgColor = 'linear-gradient(135deg, #dc3545, #c82333)';
-                            textColor = 'white';
-                        } else if (rating >= 8) {
-                            level = 'High';
-                            color = '#fd7e14';
-                            bgColor = 'linear-gradient(135deg, #f8d7da, #f5c6cb)';
-                            textColor = '#721c24';
-                        } else if (rating >= 4) {
-                            level = 'Medium';
-                            color = '#ffc107';
-                            bgColor = 'linear-gradient(135deg, #fff3cd, #ffeaa7)';
-                            textColor = '#856404';
-                        }
-
-                        ratingDisplay.innerHTML = `
-                            <div style="display: flex; align-items: center; justify-content: space-between;">
-                                <strong>Risk Rating:</strong>
-                                <div style="background: ${bgColor}; color: ${textColor}; padding: 0.5rem 1rem; border-radius: 15px; font-weight: bold; display: flex; align-items: center; gap: 0.5rem;">
-                                    <i class="fas fa-calculator"></i>
-                                    ${rating} - ${level}
-                                </div>
-                            </div>
-                        `;
-
-                        // Add animation
-                        ratingDisplay.style.transform = 'scale(1.05)';
-                        setTimeout(() => {
-                            ratingDisplay.style.transform = 'scale(1)';
-                        }, 200);
-
-                    } else {
-                        ratingDisplay.innerHTML = `
-                            <div style="text-align: center; color: #666; font-style: italic;">
-                                <i class="fas fa-info-circle"></i>
-                                Select both likelihood and consequence to calculate risk rating
-                            </div>
-                        `;
-                    }
-                }
-            }
-        }
-
-        // Initialize risk calculators only for editable sections
-        <?php if (!$section_c_completed): ?>
-        calculateRisk('inherent_likelihood', 'inherent_consequence', 'inherent_rating');
-        calculateRisk('residual_likelihood', 'residual_consequence', 'residual_rating');
-        <?php endif; ?>
-
-        // Progress bar animation
-        const progressFill = document.querySelector('.completion-fill');
-        if (progressFill) {
-            const targetWidth = progressFill.style.width;
-            progressFill.style.width = '0%';
-            setTimeout(() => {
-                progressFill.style.width = targetWidth;
-            }, 500);
-        }
-
-        // Close modals when clicking outside
-        window.addEventListener('click', function(e) {
-            if (e.target.classList.contains('modal')) {
-                e.target.classList.remove('show');
-            }
-        });
-    
         function selectLikelihood(element, value) {
-            // Remove selection from all likelihood boxes
             document.querySelectorAll('.likelihood-box').forEach(box => {
                 box.style.border = '3px solid transparent';
             });
             
-            // Highlight selected box
             element.style.border = '3px solid #333';
-            
-            // Set the hidden input value
             document.getElementById('likelihood_value').value = value;
-            
-            // Recalculate risk rating
             calculateRiskRating();
         }
         
         function selectImpact(element, value) {
-            // Remove selection from all impact boxes
             document.querySelectorAll('.impact-box').forEach(box => {
                 box.style.border = '3px solid transparent';
             });
             
-            // Highlight selected box
             element.style.border = '3px solid #333';
-            
-            // Set the hidden input value
             document.getElementById('impact_value').value = value;
             
-            // Get current impact description and store it
             const category = document.getElementById('impact_category').value;
             if (category) {
                 const impactData = getImpactData();
@@ -2827,43 +2714,78 @@ $completion_percentage = round($base_completion + $treatment_completion);
                 }
             }
             
-            // Recalculate risk rating
             calculateRiskRating();
         }
         
-        function calculateRiskRating() {
-            const likelihood = document.getElementById('likelihood_value').value;
-            const impact = document.getElementById('impact_value').value;
-            
-            if (likelihood && impact && !isNaN(likelihood) && !isNaN(impact) && likelihood > 0 && impact > 0) {
-                const rating = parseInt(likelihood) * parseInt(impact);
-                let level = 'Low';
-                let className = 'rating-low';
-                let color = '#28a745';
-                
-                if (rating >= 12) {
-                    level = 'Critical';
-                    className = 'rating-critical';
-                    color = '#dc3545';
-                } else if (rating >= 8) {
-                    level = 'High';
-                    className = 'rating-high';
-                    color = '#fd7e14';
-                } else if (rating >= 4) {
-                    level = 'Medium';
-                    className = 'rating-medium';
-                    color = '#ffc107';
-                }
-                
-                document.getElementById('rating_result').innerHTML = `
-                    <div style="background: ${color}; color: white; padding: 1rem 2rem; border-radius: 15px; font-weight: bold; display: inline-block;">
-                        <i class="fas fa-calculator"></i> ${rating} - ${level}
-                    </div>
-                `;
-            } else {
-                document.getElementById('rating_result').innerHTML = 'Rating will appear here';
-            }
+function calculateRiskRating() {
+    const likelihood = parseInt(document.getElementById('likelihood_value').value) || 0;
+    const impact = parseInt(document.getElementById('impact_value').value) || 0;
+    
+    if (likelihood > 0 && impact > 0) {
+        const rating = likelihood * impact;
+        let level = 'Low';
+        let color = '#28a745';
+        
+        if (rating >= 12) {
+            level = 'Critical';
+            color = '#dc3545';
+        } else if (rating >= 8) {
+            level = 'High';
+            color = '#fd7e14';
+        } else if (rating >= 4) {
+            level = 'Medium';
+            color = '#ffc107';
         }
+        
+        document.getElementById('inherent_rating_result').innerHTML = `
+            <span style="background: ${color}; color: white; padding: 10px 20px; border-radius: 10px; font-weight: bold;">Inherent Risk Rating: ${level.toUpperCase()} (${rating})</span>`;
+        
+        document.getElementById('risk_rating_value').value = rating;
+        document.getElementById('inherent_risk_level_value').value = level.toLowerCase();
+        
+        const controlAssessment = 1; // Default value as specified
+        const residualRating = Math.round(rating * controlAssessment);
+        let residualLevel = 'Low';
+        let residualColor = '#28a745';
+        
+        if (residualRating >= 12) {
+            residualLevel = 'Critical';
+            residualColor = '#dc3545';
+        } else if (residualRating >= 8) {
+            residualLevel = 'High';
+            residualColor = '#fd7e14';
+        } else if (residualRating >= 4) {
+            residualLevel = 'Medium';
+            residualColor = '#ffc107';
+        }
+        
+        document.getElementById('residual_rating_result').innerHTML = `
+            <span style="background: ${residualColor}; color: white; padding: 10px 20px; border-radius: 10px; font-weight: bold;">Residual Risk Rating: ${residualLevel.toUpperCase()} (${residualRating})</span>`;
+        
+        document.getElementById('residual_rating_value').value = residualRating;
+        document.getElementById('residual_risk_level_value').value = residualLevel.toLowerCase();
+        document.getElementById('control_assessment_value').value = controlAssessment;
+        
+        // Update primary risk in allRisks array
+        allRisks[0] = {
+            category: document.getElementById('primary_risk_category_display').textContent.trim(),
+            likelihood: likelihood,
+            impact: impact,
+            rating: rating
+        };
+        
+        calculateGeneralRiskScore();
+    } else {
+        document.getElementById('inherent_rating_result').textContent = 'Inherent Risk Rating will appear here';
+        document.getElementById('residual_rating_result').textContent = 'Residual Risk Rating will appear here';
+        document.getElementById('risk_rating_value').value = '';
+        document.getElementById('residual_rating_value').value = '';
+        document.getElementById('inherent_risk_level_value').value = '';
+        document.getElementById('residual_risk_level_value').value = '';
+        document.getElementById('control_assessment_value').value = '';
+    }
+}
+
         
         function updateImpactBoxes() {
             const category = document.getElementById('impact_category').value;
@@ -2950,12 +2872,494 @@ $completion_percentage = round($base_completion + $treatment_completion);
                 }
             };
         }
-        
-        // Initialize impact boxes on page load
-        document.addEventListener('DOMContentLoaded', function() {
-            updateImpactBoxes();
-            calculateRiskRating();
+
+        // Progress bar animation
+        const progressFill = document.querySelector('.completion-fill');
+        if (progressFill) {
+            const targetWidth = progressFill.style.width;
+            progressFill.style.width = '0%';
+            setTimeout(() => {
+                progressFill.style.width = targetWidth;
+            }, 500);
+        }
+
+        // Close modals when clicking outside
+        window.addEventListener('click', function(e) {
+            if (e.target.classList.contains('modal')) {
+                e.target.classList.remove('show');
+            }
         });
     </script>
+
+    <script>
+
+// Impact definitions for each risk category
+const impactDefinitions = {
+    'Financial Exposure': {
+        extreme: "> UGX 500M or > 5% of annual revenue",
+        significant: "UGX 100M - 500M or 1-5% of annual revenue", 
+        moderate: "UGX 50M - 100M or 0.5-1% of annual revenue",
+        minor: "< UGX 50M or < 0.5% of annual revenue"
+    },
+    'Market Share': {
+        extreme: "> 10% decrease in market share",
+        significant: "5-10% decrease in market share",
+        moderate: "2-5% decrease in market share", 
+        minor: "< 2% decrease in market share"
+    },
+    'Customer Experience': {
+        extreme: "Mass customer exodus, permanent reputation damage",
+        significant: "Significant customer complaints, media coverage",
+        moderate: "Moderate customer dissatisfaction, some complaints",
+        minor: "Minimal customer inconvenience"
+    },
+    'Compliance': {
+        extreme: "> UGX 100M in penalties, license revocation",
+        significant: "UGX 50M - 100M in penalties, regulatory action",
+        moderate: "UGX 10M - 50M in penalties, warnings",
+        minor: "< UGX 10M in penalties, minor violations"
+    },
+    'Reputation': {
+        extreme: "National media coverage, permanent brand damage",
+        significant: "Regional media coverage, significant brand impact",
+        moderate: "Local media coverage, moderate brand impact",
+        minor: "Limited negative publicity"
+    },
+    'Fraud': {
+        extreme: "> UGX 200M loss, systemic fraud",
+        significant: "UGX 50M - 200M loss, organized fraud",
+        moderate: "UGX 10M - 50M loss, isolated incidents",
+        minor: "< UGX 10M loss, minor fraud attempts"
+    },
+    'Operations': {
+        extreme: "> 7 days business disruption, complete shutdown",
+        significant: "3-7 days disruption, major service impact",
+        moderate: "1-3 days disruption, moderate service impact",
+        minor: "< 1 day disruption, minimal impact"
+    },
+    'Networks': {
+        extreme: "> 24 hours network outage, complete connectivity loss",
+        significant: "8-24 hours outage, major connectivity issues",
+        moderate: "2-8 hours outage, moderate connectivity issues",
+        minor: "< 2 hours outage, minor connectivity issues"
+    },
+    'People': {
+        extreme: "Multiple fatalities, permanent disabilities",
+        significant: "Single fatality, serious injuries",
+        moderate: "Serious injury, temporary disability",
+        minor: "Minor injury, first aid treatment"
+    },
+    'IT': {
+        extreme: "Complete system compromise, massive data breach",
+        significant: "Major system breach, significant data loss",
+        moderate: "Limited system breach, moderate data exposure",
+        minor: "Minor security incident, minimal data risk"
+    },
+    'Other': {
+        extreme: "Catastrophic impact on business operations",
+        significant: "Major impact on business operations",
+        moderate: "Moderate impact on business operations",
+        minor: "Minor impact on business operations"
+    }
+};
+
+// Global variables for risk tracking
+let additionalRiskCounter = 1;
+let allRisks = [];
+
+function toggleAdditionalRisks(show) {
+    const container = document.getElementById('additional_risks_container');
+    const addButton = document.getElementById('add_risk_btn');
+    
+    if (show) {
+        container.style.display = 'block';
+        addButton.style.display = 'inline-block';
+        // Add first additional risk automatically
+        if (container.children.length === 0) {
+            addAdditionalRisk();
+        }
+    } else {
+        container.style.display = 'none';
+        addButton.style.display = 'none';
+        // Clear all additional risks
+        container.innerHTML = '';
+        additionalRiskCounter = 1;
+        allRisks = allRisks.filter((risk, index) => index === 0); // Keep only primary risk
+        calculateGeneralRiskScore();
+    }
+}
+
+// Update impact boxes based on primary risk category
+function updateImpactBoxesFromCategory() {
+    const primaryCategory = document.getElementById('primary_risk_category_display').textContent.trim();
+    
+    if (primaryCategory && primaryCategory !== 'Select Risk Category from Section A' && impactDefinitions[primaryCategory]) {
+        const definitions = impactDefinitions[primaryCategory];
+        
+        document.getElementById('extreme_text').textContent = definitions.extreme;
+        document.getElementById('significant_text').textContent = definitions.significant;
+        document.getElementById('moderate_text').textContent = definitions.moderate;
+        document.getElementById('minor_text').textContent = definitions.minor;
+    }
+}
+
+// Select likelihood
+function selectLikelihood(element, value) {
+    // Remove selection from all likelihood boxes
+    document.querySelectorAll('.likelihood-box').forEach(box => {
+        box.style.border = '3px solid transparent';
+    });
+    
+    // Select current box
+    element.style.border = '3px solid #333';
+    document.getElementById('likelihood_value').value = value;
+    
+    calculateRiskRating();
+}
+
+// Select impact
+function selectImpact(element, value) {
+    // Remove selection from all impact boxes
+    document.querySelectorAll('.impact-box').forEach(box => {
+        box.style.border = '3px solid transparent';
+    });
+    
+    // Select current box
+    element.style.border = '3px solid #333';
+    document.getElementById('impact_value').value = value;
+    
+    calculateRiskRating();
+}
+
+function calculateRiskRating() {
+    const likelihood = parseInt(document.getElementById('likelihood_value').value) || 0;
+    const impact = parseInt(document.getElementById('impact_value').value) || 0;
+    const primaryCategory = document.getElementById('primary_risk_category_display').textContent.trim();
+    
+    if (likelihood > 0 && impact > 0) {
+        const rating = likelihood * impact;
+        let level = 'Low';
+        let color = '#28a745';
+        
+        if (rating >= 12) {
+            level = 'Critical';
+            color = '#dc3545';
+        } else if (rating >= 8) {
+            level = 'High';
+            color = '#fd7e14';
+        } else if (rating >= 4) {
+            level = 'Medium';
+            color = '#ffc107';
+        }
+        
+        document.getElementById('inherent_rating_result').innerHTML = 
+            `<span style="background: ${color}; color: white; padding: 15px 30px; border-radius: 8px; font-weight: bold; font-size: 16px;">${rating} - ${level}</span>`;
+        
+        document.getElementById('risk_rating_value').value = rating;
+        document.getElementById('inherent_risk_level_value').value = level;
+        
+        // Update residual risk (same as inherent for now)
+        document.getElementById('residual_rating_result').innerHTML = 
+            `<span style="background: ${color}; color: white; padding: 15px 30px; border-radius: 8px; font-weight: bold; font-size: 16px;">${rating} - ${level}</span>`;
+        
+        document.getElementById('residual_rating_value').value = rating;
+        document.getElementById('residual_risk_level_value').value = level;
+        
+        // Update allRisks array for primary risk
+        allRisks[0] = {
+            category: primaryCategory,
+            likelihood: likelihood,
+            impact: impact,
+            rating: rating
+        };
+        
+        calculateGeneralRiskScore();
+    } else {
+        document.getElementById('inherent_rating_result').innerHTML = 'Inherent Risk Rating will appear here';
+        document.getElementById('residual_rating_result').innerHTML = 'Residual Risk Rating will appear here';
+        document.getElementById('risk_rating_value').value = '';
+        
+        // Remove primary risk from allRisks
+        delete allRisks[0];
+    }
+}
+
+// Add additional risk assessment
+function addAdditionalRisk() {
+    additionalRiskCounter++;
+    const romanNumerals = ['', 'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x'];
+    const romanNumeral = romanNumerals[additionalRiskCounter] || additionalRiskCounter.toString();
+    
+    const container = document.getElementById('additional_risks_container');
+    const riskDiv = document.createElement('div');
+    riskDiv.className = 'additional-risk';
+    riskDiv.id = `additional_risk_${additionalRiskCounter}`;
+    
+    // Get used categories to prevent duplicates
+    const usedCategories = allRisks.map(risk => risk && risk.category).filter(cat => cat);
+    const primaryCategory = document.getElementById('primary_risk_category_display').textContent.trim();
+    if (primaryCategory && primaryCategory !== 'Select Risk Category from Section A') {
+        usedCategories.push(primaryCategory);
+    }
+    
+    riskDiv.innerHTML = `
+        <div style="border: 2px solid #e9ecef; border-radius: 10px; padding: 25px; margin-bottom: 20px; background: #f8f9fa;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h5 style="color: #495057; margin: 0;">Additional Risk Assessment (${romanNumeral})</h5>
+                <button type="button" onclick="removeAdditionalRisk(${additionalRiskCounter})" 
+                        style="background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <div class="form-group" style="margin-bottom: 20px;">
+                <label class="form-label">Risk Category *</label>
+                <select id="additional_category_${additionalRiskCounter}" name="additional_categories[]" 
+                        onchange="updateAdditionalImpactBoxes(${additionalRiskCounter})" 
+                        style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;" required>
+                    <option value="">-- Select Category --</option>
+                    ${Object.keys(impactDefinitions).map(category => 
+                        usedCategories.includes(category) ? '' : `<option value="${category}">${category}</option>`
+                    ).join('')}
+                </select>
+            </div>
+            
+            <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 300px;">
+                    <label class="form-label">Likelihood *</label>
+                    <div class="likelihood-boxes" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
+                        <div class="likelihood-box" style="background-color: #ff4444; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                             onclick="selectAdditionalLikelihood(this, 4, ${additionalRiskCounter})" data-value="4">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">ALMOST CERTAIN</div>
+                            <div style="font-size: 12px; line-height: 1.3;">
+                                1. Guaranteed to happen<br>
+                                2. Has been happening<br>
+                                3. Continues to happen
+                            </div>
+                        </div>
+                        <div class="likelihood-box" style="background-color: #ff8800; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                             onclick="selectAdditionalLikelihood(this, 3, ${additionalRiskCounter})" data-value="3">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">LIKELY</div>
+                            <div style="font-size: 12px; line-height: 1.3;">
+                                A history of happening at certain intervals/seasons/events
+                            </div>
+                        </div>
+                        <div class="likelihood-box" style="background-color: #ffdd00; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                             onclick="selectAdditionalLikelihood(this, 2, ${additionalRiskCounter})" data-value="2">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">POSSIBLE</div>
+                            <div style="font-size: 12px; line-height: 1.3;">
+                                1. More than 1 year from last occurrence<br>
+                                2. Circumstances indicating or allowing possibility of happening
+                            </div>
+                        </div>
+                        <div class="likelihood-box" style="background-color: #88dd88; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                             onclick="selectAdditionalLikelihood(this, 1, ${additionalRiskCounter})" data-value="1">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">UNLIKELY</div>
+                            <div style="font-size: 12px; line-height: 1.3;">
+                                1. Not occurred before<br>
+                                2. This is the first time its happening<br>
+                                3. Not expected to happen for sometime
+                            </div>
+                        </div>
+                    </div>
+                    <input type="hidden" name="additional_likelihood[]" id="additional_likelihood_${additionalRiskCounter}" required>
+                </div>
+                
+                <div style="flex: 1; min-width: 300px;">
+                    <label class="form-label">Impact *</label>
+                    <div class="impact-boxes" id="additional_impact_boxes_${additionalRiskCounter}" style="display: none; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
+                        <div class="impact-box" style="background-color: #ff4444; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                             onclick="selectAdditionalImpact(this, 4, ${additionalRiskCounter})" data-value="4">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">EXTREME</div>
+                            <div id="additional_extreme_text_${additionalRiskCounter}" style="font-size: 12px; line-height: 1.3;"></div>
+                        </div>
+                        <div class="impact-box" style="background-color: #ff8800; color: white; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                             onclick="selectAdditionalImpact(this, 3, ${additionalRiskCounter})" data-value="3">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">SIGNIFICANT</div>
+                            <div id="additional_significant_text_${additionalRiskCounter}" style="font-size: 12px; line-height: 1.3;"></div>
+                        </div>
+                        <div class="impact-box" style="background-color: #ffdd00; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                             onclick="selectAdditionalImpact(this, 2, ${additionalRiskCounter})" data-value="2">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">MODERATE</div>
+                            <div id="additional_moderate_text_${additionalRiskCounter}" style="font-size: 12px; line-height: 1.3;"></div>
+                        </div>
+                        <div class="impact-box" style="background-color: #88dd88; color: black; padding: 15px; border-radius: 8px; cursor: pointer; border: 3px solid transparent; text-align: center; font-weight: bold;"
+                             onclick="selectAdditionalImpact(this, 1, ${additionalRiskCounter})" data-value="1">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">MINOR</div>
+                            <div id="additional_minor_text_${additionalRiskCounter}" style="font-size: 12px; line-height: 1.3;"></div>
+                        </div>
+                    </div>
+                    <input type="hidden" name="additional_impact[]" id="additional_impact_${additionalRiskCounter}" required>
+                </div>
+            </div>
+            
+            <div style="text-align: center; margin-top: 20px;">
+                <div id="additional_rating_display_${additionalRiskCounter}" style="display: inline-block; padding: 15px 30px; border: 2px solid #ddd; border-radius: 10px; background: white;">
+                    <strong>Rating will appear here</strong>
+                </div>
+                <input type="hidden" name="additional_ratings[]" id="additional_rating_${additionalRiskCounter}">
+            </div>
+        </div>
+    `;
+    
+    container.appendChild(riskDiv);
+}
+
+// Update impact boxes for additional risk
+function updateAdditionalImpactBoxes(riskId) {
+    const categorySelect = document.getElementById(`additional_category_${riskId}`);
+    const category = categorySelect.value;
+    
+    if (category && impactDefinitions[category]) {
+        const definitions = impactDefinitions[category];
+        
+        document.getElementById(`additional_extreme_text_${riskId}`).textContent = definitions.extreme;
+        document.getElementById(`additional_significant_text_${riskId}`).textContent = definitions.significant;
+        document.getElementById(`additional_moderate_text_${riskId}`).textContent = definitions.moderate;
+        document.getElementById(`additional_minor_text_${riskId}`).textContent = definitions.minor;
+        
+        document.getElementById(`additional_impact_boxes_${riskId}`).style.display = 'grid';
+    } else {
+        document.getElementById(`additional_impact_boxes_${riskId}`).style.display = 'none';
+    }
+}
+
+// Select additional likelihood
+function selectAdditionalLikelihood(element, value, riskId) {
+    const container = document.getElementById(`additional_risk_${riskId}`);
+    container.querySelectorAll('.likelihood-box').forEach(box => {
+        box.style.border = '3px solid transparent';
+    });
+    
+    element.style.border = '3px solid #333';
+    document.getElementById(`additional_likelihood_${riskId}`).value = value;
+    
+    calculateAdditionalRiskRating(riskId);
+}
+
+// Select additional impact
+function selectAdditionalImpact(element, value, riskId) {
+    const container = document.getElementById(`additional_risk_${riskId}`);
+    container.querySelectorAll('.impact-box').forEach(box => {
+        box.style.border = '3px solid transparent';
+    });
+    
+    element.style.border = '3px solid #333';
+    document.getElementById(`additional_impact_${riskId}`).value = value;
+    
+    calculateAdditionalRiskRating(riskId);
+}
+
+// Calculate additional risk rating
+function calculateAdditionalRiskRating(riskId) {
+    const likelihood = parseInt(document.getElementById(`additional_likelihood_${riskId}`).value) || 0;
+    const impact = parseInt(document.getElementById(`additional_impact_${riskId}`).value) || 0;
+    const category = document.getElementById(`additional_category_${riskId}`).value;
+    
+    if (likelihood > 0 && impact > 0) {
+        const rating = likelihood * impact;
+        let level = 'Low';
+        let color = '#28a745';
+        
+        if (rating >= 12) {
+            level = 'Critical';
+            color = '#dc3545';
+        } else if (rating >= 8) {
+            level = 'High';
+            color = '#fd7e14';
+        } else if (rating >= 4) {
+            level = 'Medium';
+            color = '#ffc107';
+        }
+        
+        document.getElementById(`additional_rating_display_${riskId}`).innerHTML = 
+            `<span style="background: ${color}; color: white; padding: 10px 20px; border-radius: 10px; font-weight: bold;">${rating} - ${level}</span>`;
+        
+        document.getElementById(`additional_rating_${riskId}`).value = rating;
+        
+        // Update allRisks array
+        allRisks[riskId] = {
+            category: category,
+            likelihood: likelihood,
+            impact: impact,
+            rating: rating
+        };
+        
+        calculateGeneralRiskScore();
+    } else {
+        document.getElementById(`additional_rating_display_${riskId}`).innerHTML = '<strong>Rating will appear here</strong>';
+        document.getElementById(`additional_rating_${riskId}`).value = '';
+        
+        // Remove from allRisks array
+        delete allRisks[riskId];
+    }
+}
+
+// Remove additional risk
+function removeAdditionalRisk(riskId) {
+    document.getElementById(`additional_risk_${riskId}`).remove();
+    delete allRisks[riskId];
+    calculateGeneralRiskScore();
+}
+
+// Calculate general risk score
+function calculateGeneralRiskScore() {
+    const validRisks = allRisks.filter(risk => risk && risk.rating > 0);
+    
+    if (validRisks.length > 0) {
+        const totalRating = validRisks.reduce((sum, risk) => sum + risk.rating, 0);
+        const averageRating = totalRating / validRisks.length;
+        const inherentScore = averageRating * validRisks.length;
+        
+        document.getElementById('general_inherent_score').textContent = inherentScore.toFixed(2);
+        document.getElementById('general_inherent_risk_score_value').value = inherentScore.toFixed(2);
+        
+        const controlAssessment = 1; // Default value
+        const residualScore = inherentScore * controlAssessment;
+        document.getElementById('general_residual_score').textContent = residualScore.toFixed(2);
+        document.getElementById('general_residual_risk_score_value').value = residualScore.toFixed(2);
+    } else {
+        document.getElementById('general_inherent_score').textContent = '0.00';
+        document.getElementById('general_residual_score').textContent = '0.00';
+        document.getElementById('general_inherent_risk_score_value').value = '0';
+        document.getElementById('general_residual_risk_score_value').value = '0';
+    }
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize impact boxes based on existing primary category
+    updateImpactBoxesFromCategory();
+    
+    // Initialize allRisks array with primary risk if it exists
+    const primaryLikelihood = parseInt(document.getElementById('likelihood_value')?.value) || 0;
+    const primaryImpact = parseInt(document.getElementById('impact_value')?.value) || 0;
+    const primaryCategory = document.getElementById('primary_risk_category_display')?.textContent.trim();
+    
+    if (primaryLikelihood > 0 && primaryImpact > 0 && primaryCategory !== 'Select Risk Category from Section A') {
+        allRisks[0] = {
+            category: primaryCategory,
+            likelihood: primaryLikelihood,
+            impact: primaryImpact,
+            rating: primaryLikelihood * primaryImpact
+        };
+        calculateGeneralRiskScore();
+    }
+});
+
+// Listen for changes in primary risk category from Section A
+function updatePrimaryRiskCategory(category) {
+    document.getElementById('primary_risk_category_display').textContent = category;
+    updateImpactBoxesFromCategory();
+    
+    // Update primary risk in allRisks array
+    if (allRisks[0]) {
+        allRisks[0].category = category;
+        calculateGeneralRiskScore();
+    }
+}
+
+</script>
+
 </body>
 </html>

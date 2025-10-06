@@ -196,8 +196,7 @@ if ($_POST && isset($_POST['add_treatment'])) {
     }
 }
 
-if ($_POST && isset($_POST['submit_risk_report'])) {
-    // Handle risk report submission (new separate submission)
+if ($_POST && isset($_POST['submit_risk'])) {
     try {
         $db->beginTransaction();
 
@@ -412,98 +411,67 @@ if ($_POST && isset($_POST['submit_risk_report'])) {
                 $supporting_files = handleFileUploads($_FILES['supporting_document'], $risk_id, 'supporting_documents', $db);
             }
             
-            $db->commit();
-            
-            $_SESSION['submitted_risk_id'] = $risk_id;
-            $_SESSION['success_message'] = "Risk report submitted successfully! You can now add treatment methods.";
-            
-            // Reload page to show submitted risk and treatment section
-            header("Location: " . $_SERVER['PHP_SELF'] . "?risk_submitted=1");
-            exit();
-        } else {
-            $db->rollback();
-            $error = "Failed to submit risk report.";
-        }
-    } catch (Exception $e) {
-        $db->rollback();
-        $error = $e->getMessage();
-    }
-}
+            // After successful risk insertion, insert all treatments
+            if (!empty($_SESSION['temp_treatments'])) {
+                foreach ($_SESSION['temp_treatments'] as $treatment) {
+                    $treatment_query = "INSERT INTO risk_treatments
+                                       (risk_id, treatment_title, treatment_description, assigned_to, target_completion_date, status, created_by, created_at)
+                                       VALUES (:risk_id, :title, :description, :assigned_to, :target_date, :status, :created_by, :created_at)";
 
-if ($_POST && isset($_POST['submit_treatments'])) {
-    try {
-        $db->beginTransaction();
-        
-        $risk_id = $_SESSION['submitted_risk_id'];
-        
-        // Insert all treatments for the submitted risk
-        if (!empty($_SESSION['temp_treatments'])) {
-            foreach ($_SESSION['temp_treatments'] as $treatment) {
-                $treatment_query = "INSERT INTO risk_treatments
-                                   (risk_id, treatment_title, treatment_description, assigned_to, target_completion_date, status, created_by, created_at)
-                                   VALUES (:risk_id, :title, :description, :assigned_to, :target_date, :status, :created_by, :created_at)";
+                    $treatment_stmt = $db->prepare($treatment_query);
+                    $treatment_stmt->bindParam(':risk_id', $risk_id); // Use the newly created risk_id
+                    $treatment_stmt->bindParam(':title', $treatment['treatment_title']);
+                    $treatment_stmt->bindParam(':description', $treatment['treatment_description']);
+                    $treatment_stmt->bindParam(':assigned_to', $treatment['assigned_to']);
+                    $treatment_stmt->bindParam(':target_date', $treatment['target_completion_date']);
+                    $treatment_stmt->bindParam(':status', $treatment['status']);
+                    $treatment_stmt->bindParam(':created_by', $treatment['created_by']);
+                    $treatment_stmt->bindParam(':created_at', $treatment['created_at']);
 
-                $treatment_stmt = $db->prepare($treatment_query);
-                $treatment_stmt->bindParam(':risk_id', $risk_id);
-                $treatment_stmt->bindParam(':title', $treatment['treatment_title']);
-                $treatment_stmt->bindParam(':description', $treatment['treatment_description']);
-                $treatment_stmt->bindParam(':assigned_to', $treatment['assigned_to']);
-                $treatment_stmt->bindParam(':target_date', $treatment['target_completion_date']);
-                $treatment_stmt->bindParam(':status', $treatment['status']);
-                $treatment_stmt->bindParam(':created_by', $treatment['created_by']);
-                $treatment_stmt->bindParam(':created_at', $treatment['created_at']);
+                    if ($treatment_stmt->execute()) {
+                        $treatment_id = $db->lastInsertId();
 
-                if ($treatment_stmt->execute()) {
-                    $treatment_id = $db->lastInsertId();
-
-                    // Insert treatment files
-                    foreach ($treatment['files'] as $file) {
-                        // Move file from temp to permanent location
-                        $permanent_path = str_replace('temp_treatments', 'treatments', $file['file_path']);
-                        if (!file_exists('uploads/treatments/')) {
-                            mkdir('uploads/treatments/', 0755, true);
-                        }
-                        
-                        if (rename($file['file_path'], $permanent_path)) {
-                            $file_query = "INSERT INTO treatment_documents
-                                         (treatment_id, original_filename, file_path, file_size, file_type, uploaded_at)
-                                         VALUES (:treatment_id, :original_filename, :file_path, :file_size, :file_type, NOW())";
-                            $file_stmt = $db->prepare($file_query);
-                            $file_stmt->bindParam(':treatment_id', $treatment_id);
-                            $file_stmt->bindParam(':original_filename', $file['original_filename']);
-                            $file_stmt->bindParam(':file_path', $permanent_path);
-                            $file_stmt->bindParam(':file_size', $file['file_size']);
-                            $file_stmt->bindParam(':file_type', $file['file_type']);
-                            $file_stmt->execute();
+                        // Insert treatment files
+                        foreach ($treatment['files'] as $file) {
+                            // Move file from temp to permanent location
+                            $permanent_path = str_replace('temp_treatments', 'treatments', $file['file_path']);
+                            if (!file_exists('uploads/treatments/')) {
+                                mkdir('uploads/treatments/', 0755, true);
+                            }
+                            
+                            if (rename($file['file_path'], $permanent_path)) {
+                                $file_query = "INSERT INTO treatment_documents
+                                             (treatment_id, original_filename, file_path, file_size, file_type, uploaded_at)
+                                             VALUES (:treatment_id, :original_filename, :file_path, :file_size, :file_type, NOW())";
+                                $file_stmt = $db->prepare($file_query);
+                                $file_stmt->bindParam(':treatment_id', $treatment_id);
+                                $file_stmt->bindParam(':original_filename', $file['original_filename']);
+                                $file_stmt->bindParam(':file_path', $permanent_path);
+                                $file_stmt->bindParam(':file_size', $file['file_size']);
+                                $file_stmt->bindParam(':file_type', $file['file_type']);
+                                $file_stmt->execute();
+                            }
                         }
                     }
                 }
             }
+            
+            // Clear session treatments and form data after successful submission
+            unset($_SESSION['temp_treatments']);
+            unset($_SESSION['form_data']);
+            
+            $db->commit();
+            $_SESSION['success_message'] = "Risk and all treatment methods submitted successfully!";
+            header("Location: risk_owner_dashboard.php?success=1");
+            exit();
+        } else {
+            $db->rollback();
+            $error = "Failed to report comprehensive risk.";
         }
-        
-        // Clear session data after successful submission
-        unset($_SESSION['temp_treatments']);
-        unset($_SESSION['submitted_risk_id']);
-        
-        $db->commit();
-        $_SESSION['success_message'] = "Risk and all treatment methods submitted successfully!";
-        header("Location: risk_owner_dashboard.php?success=1");
-        exit();
-        
     } catch (Exception $e) {
         $db->rollback();
         $error = $e->getMessage();
     }
-}
-
-$submitted_risk = null;
-if (isset($_SESSION['submitted_risk_id'])) {
-    $risk_query = "SELECT * FROM risk_incidents WHERE id = :risk_id AND risk_owner_id = :user_id";
-    $risk_stmt = $db->prepare($risk_query);
-    $risk_stmt->bindParam(':risk_id', $_SESSION['submitted_risk_id']);
-    $risk_stmt->bindParam(':user_id', $_SESSION['user_id']);
-    $risk_stmt->execute();
-    $submitted_risk = $risk_stmt->fetch(PDO::FETCH_ASSOC);
 }
 
 // Get form data from session if available for repopulation
@@ -1783,9 +1751,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 <?php if ($error): ?>
                     <div class="alert alert-danger"><?php echo $error; ?></div>
                 <?php endif; ?>
-            
-            <?php if (!$submitted_risk): ?>
-                <!-- Risk Assessment Form - Only show if risk not yet submitted -->
+                
                 <form method="POST" enctype="multipart/form-data">
                     <div class="section-header">
                         <i class="fas fa-search"></i> Section 1: Risk Identification
@@ -2262,119 +2228,14 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                             <!-- Added JavaScript to clear all form fields before submission -->
                             <button type="button" class="btn btn-secondary" onclick="clearEntireForm()">Cancel</button>
                         </form>
-                        <!-- Changed button name to submit_risk_report -->
-                        <button type="submit" name="submit_risk_report" class="btn">
+                        <button type="submit" name="submit_risk" class="btn">
                             <i class="fas fa-save"></i> Submit Risk Report
                         </button>
                     </div>
                 </form>
-            <?php else: ?>
-                <!-- Display submitted risk data and show treatment section -->
-                <div class="section-header">
-                    <i class="fas fa-check-circle"></i> Submitted Risk Report
-                </div>
-                
-                <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
-                    <h4 style="color: #28a745; margin-bottom: 15px;">Risk Details</h4>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                        <div><strong>Risk Name:</strong> <?php echo htmlspecialchars($submitted_risk['risk_name']); ?></div>
-                        <div><strong>Department:</strong> <?php echo htmlspecialchars($submitted_risk['department']); ?></div>
-                        <div><strong>Risk Category:</strong> <?php echo htmlspecialchars(json_decode($submitted_risk['risk_categories'])[0] ?? ''); ?></div>
-                        <div><strong>Risk Level:</strong> <?php echo htmlspecialchars($submitted_risk['general_inherent_risk_level']); ?></div>
-                    </div>
-                    <div style="margin-top: 15px;">
-                        <strong>Description:</strong><br>
-                        <?php echo nl2br(htmlspecialchars($submitted_risk['risk_description'])); ?>
-                    </div>
-                </div>
-                
-                <!-- Treatment Methods Section - Now visible after risk submission -->
-                <div class="section-header">
-                    <i class="fas fa-shield-alt"></i> Section 3: Treatment Methods
-                </div>
-                
-                <div class="treatments-container">
-                                <?php if (empty($treatments)): ?>
-                                    <div class="empty-treatments">
-                                        <div class="empty-icon">
-                                            <i class="fas fa-plus-circle"></i>
-                                        </div>
-                                        <h4>No Treatment Methods Added</h4>
-                                        <p>Add your first treatment method to begin risk mitigation planning</p>
-                                        <button type="button" class="btn btn-info" onclick="openAddTreatmentModal()">
-                                            <i class="fas fa-plus"></i> Add First Treatment Method
-                                        </button>
-                                    </div>
-                                <?php else: ?>
-                                    <div class="treatments-grid">
-                                        <?php foreach ($treatments as $treatment): ?>
-                                            <div class="treatment-card">
-                                                <div class="treatment-header">
-                                                    <h4><?php echo htmlspecialchars($treatment['treatment_title']); ?></h4>
-                                                    <span class="status-badge status-<?php echo $treatment['status']; ?>">
-                                                        <?php echo ucfirst($treatment['status']); ?>
-                                                    </span>
-                                                </div>
-                                                
-                                                <div class="treatment-meta">
-                                                    <div class="meta-item">
-                                                        <i class="fas fa-user"></i>
-                                                        <span>Assigned to: <?php echo htmlspecialchars($treatment['assigned_user_name']); ?></span>
-                                                    </div>
-                                                    
-                                                    <?php if (!empty($treatment['target_completion_date'])): ?>
-                                                        <div class="meta-item">
-                                                            <i class="fas fa-calendar"></i>
-                                                            <span>Target: <?php echo date('M j, Y', strtotime($treatment['target_completion_date'])); ?></span>
-                                                        </div>
-                                                    <?php endif; ?>
-                                                    
-                                                    <?php if (!empty($treatment['files'])): ?>
-                                                        <div class="meta-item">
-                                                            <i class="fas fa-paperclip"></i>
-                                                            <span><?php echo count($treatment['files']); ?> file(s) attached</span>
-                                                        </div>
-                                                    <?php endif; ?>
-                                                </div>
-                                                
-                                                <div class="treatment-description">
-                                                    <?php 
-                                                    $description = $treatment['treatment_description'];
-                                                    echo htmlspecialchars(strlen($description) > 100 ? substr($description, 0, 100) . '...' : $description);
-                                                    ?>
-                                                </div>
-                                                
-                                                <div class="treatment-actions">
-                                                    <!-- Changed to simple link to avoid form nesting issues -->
-                                                    <a href="<?php echo $_SERVER['PHP_SELF']; ?>?remove_treatment=1&treatment_id=<?php echo urlencode($treatment['id']); ?>" 
-                                                       class="btn btn-danger btn-sm" 
-                                                       onclick="return confirm('Are you sure you want to remove this treatment?');">
-                                                        <i class="fas fa-trash"></i> Remove
-                                                    </a>
-                                                </div>
-                                            </div>
-                                        <?php endforeach; ?>
-                                    </div>
-                                    
-                                    <div style="text-align: center; margin-top: 2rem;">
-                                        <button type="button" class="btn btn-info" onclick="openAddTreatmentModal()">
-                                            <i class="fas fa-plus"></i> Add Another Treatment Method
-                                        </button>
-                                    </div>
-                                <?php endif; ?>
-                            </div>
-                
-                <form method="POST" style="margin-top: 30px;">
-                    <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                        <button type="submit" name="submit_treatments" class="btn">
-                            <i class="fas fa-save"></i> Submit All Treatments
-                        </button>
-                    </div>
-                </form>
-            <?php endif; ?>
+            </div>
         </div>
     </div>
-</div>
 
     <!-- Add Treatment Modal -->
     <div id="addTreatmentModal" class="modal">
@@ -2623,13 +2484,7 @@ document.addEventListener('DOMContentLoaded', function() {
             console.log('Restoring form data from session...');
             
             const waitForElements = () => {
-                console.log('=== DOM ELEMENT DEBUGGING ===');
                 console.log('Checking for required DOM elements...');
-                
-                // First, let's see what elements actually exist in the DOM
-                console.log('All radio buttons with name="risk_categories":', document.querySelectorAll('input[name="risk_categories"]'));
-                console.log('All likelihood boxes:', document.querySelectorAll('.likelihood-box'));
-                console.log('All impact boxes:', document.querySelectorAll('.impact-box'));
                 
                 // Check if all required elements exist before proceeding
                 let allElementsFound = true;
@@ -2637,9 +2492,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 <?php if (isset($form_data['risk_categories'])): ?>
                     const selectedCategory = <?php echo json_encode($form_data['risk_categories']); ?>;
-                    console.log('Looking for category radio with value:', selectedCategory);
                     const categoryRadio = document.querySelector(`input[name="risk_categories"][value="${selectedCategory}"]`);
-                    console.log('Found category radio:', categoryRadio);
                     if (!categoryRadio) {
                         allElementsFound = false;
                         missingElements.push(`Category radio: ${selectedCategory}`);
@@ -2648,9 +2501,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 <?php if (isset($form_data['inherent_likelihood_level'])): ?>
                     const likelihoodValue = <?php echo json_encode($form_data['inherent_likelihood_level']); ?>;
-                    console.log('Looking for likelihood box with data-value:', likelihoodValue);
                     const likelihoodBox = document.querySelector(`.likelihood-box[data-value="${likelihoodValue}"]`);
-                    console.log('Found likelihood box:', likelihoodBox);
                     if (!likelihoodBox) {
                         allElementsFound = false;
                         missingElements.push(`Likelihood box: ${likelihoodValue}`);
@@ -2659,30 +2510,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 <?php if (isset($form_data['inherent_impact_level'])): ?>
                     const impactValue = <?php echo json_encode($form_data['inherent_impact_level']); ?>;
-                    console.log('Looking for impact box with data-value:', impactValue);
                     const impactBox = document.querySelector(`.impact-box[data-value="${impactValue}"]`);
-                    console.log('Found impact box:', impactBox);
                     if (!impactBox) {
                         allElementsFound = false;
                         missingElements.push(`Impact box: ${impactValue}`);
                     }
                 <?php endif; ?>
                 
-                if (!window.retryCount) window.retryCount = 0;
-                window.retryCount++;
-                
                 if (!allElementsFound) {
                     console.log('Missing elements:', missingElements);
-                    console.log(`Retry attempt: ${window.retryCount}/50`);
-                    
-                    if (window.retryCount < 50) {
-                        console.log('Retrying in 200ms...');
-                        setTimeout(waitForElements, 200);
-                        return;
-                    } else {
-                        console.error('Max retries reached. Elements still not found. Check HTML generation.');
-                        return;
-                    }
+                    console.log('Retrying in 100ms...');
+                    setTimeout(waitForElements, 100);
+                    return;
                 }
                 
                 console.log('All required elements found! Starting restoration...');
