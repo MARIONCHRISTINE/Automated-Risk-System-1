@@ -284,7 +284,6 @@ if (isset($_POST['submit_risk'])) {
                             stored_filename, 
                             file_path, 
                             file_size, 
-                            document_content,
                             mime_type,
                             uploaded_by, 
                             uploaded_at
@@ -296,7 +295,6 @@ if (isset($_POST['submit_risk'])) {
                             :stored_filename, 
                             :file_path, 
                             :file_size, 
-                            :document_content,
                             :mime_type,
                             :uploaded_by, 
                             NOW()
@@ -305,7 +303,6 @@ if (isset($_POST['submit_risk'])) {
             $doc_stmt = $db->prepare($doc_query);
             
             foreach ($uploaded_files as $file) {
-                $file_content = file_get_contents($file['path']);
                 $finfo = finfo_open(FILEINFO_MIME_TYPE);
                 $mime_type = finfo_file($finfo, $file['path']);
                 finfo_close($finfo);
@@ -318,7 +315,6 @@ if (isset($_POST['submit_risk'])) {
                 $doc_stmt->bindParam(':stored_filename', $stored_filename);
                 $doc_stmt->bindParam(':file_path', $file['path']);
                 $doc_stmt->bindParam(':file_size', $file['size']);
-                $doc_stmt->bindParam(':document_content', $file_content, PDO::PARAM_LOB);
                 $doc_stmt->bindParam(':mime_type', $mime_type);
                 $doc_stmt->bindParam(':uploaded_by', $user_id);
                 
@@ -362,7 +358,8 @@ if (isset($_POST['submit_risk'])) {
 if (isset($_GET['download_document']) && isset($_GET['doc_id'])) {
     $doc_id = $_GET['doc_id'];
     
-    $doc_query = "SELECT document_content, original_filename, mime_type 
+    // Modify query to select file_path instead of document_content
+    $doc_query = "SELECT file_path, original_filename, mime_type 
                   FROM risk_documents 
                   WHERE id = :doc_id";
     $doc_stmt = $db->prepare($doc_query);
@@ -371,14 +368,25 @@ if (isset($_GET['download_document']) && isset($_GET['doc_id'])) {
     $document = $doc_stmt->fetch(PDO::FETCH_ASSOC);
     
     if ($document) {
-        header('Content-Type: ' . $document['mime_type']);
-        header('Content-Disposition: attachment; filename="' . $document['original_filename'] . '"');
-        header('Content-Length: ' . strlen($document['document_content']));
-        echo $document['document_content'];
-        exit;
+        $filePath = $document['file_path'];
+        if (file_exists($filePath)) {
+            header('Content-Description: File Transfer');
+            header('Content-Type: ' . $document['mime_type']);
+            header('Content-Disposition: attachment; filename="' . basename($document['original_filename']) . '"');
+            header('Expires: 0');
+            header('Cache-Control: must-revalidate');
+            header('Pragma: public');
+            header('Content-Length: ' . filesize($filePath));
+            readfile($filePath);
+            exit;
+        } else {
+            http_response_code(404);
+            echo "File not found at path: " . htmlspecialchars($filePath);
+            exit;
+        }
     } else {
         http_response_code(404);
-        echo "Document not found";
+        echo "Document not found in database";
         exit;
     }
 }
