@@ -6,6 +6,7 @@ include_once 'includes/auto_assignment.php';
 
 $database = new Database();
 $db = $database->getConnection();
+
 function generateRiskId($db, $department) {
     try {
         // Get department initial from departments table
@@ -52,8 +53,6 @@ function generateRiskId($db, $department) {
         return null;
     }
 }
-
-// ... existing code ...
 
 if (isset($_POST['submit_risk'])) {
     try {
@@ -359,8 +358,6 @@ if (isset($_POST['submit_risk'])) {
         error_log("Risk submission database error: " . $e->getMessage());
     }
 }
-
-// ... existing code ...
 
 if (isset($_GET['download_document']) && isset($_GET['doc_id'])) {
     $doc_id = $_GET['doc_id'];
@@ -833,6 +830,37 @@ if (empty($user['department']) || $user['department'] === null) {
             border-left: 4px solid #dc3545;
             font-weight: 500;
         }
+        
+        /* Repositioned Learn More button to sit horizontally next to chatbot */
+        .learn-more-btn {
+            position: fixed;
+            bottom: 25px;
+            right: 110px; /* Adjusted position */
+            height: 65px;
+            padding: 0 25px;
+            background: linear-gradient(135deg, #E60012 0%, #B8000E 100%);
+            border-radius: 35px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            cursor: pointer;
+            box-shadow: 0 8px 25px rgba(230, 0, 18, 0.3);
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: transform 0.3s;
+            z-index: 1000;
+            border: none;
+            white-space: nowrap;
+        }
+        .learn-more-btn:hover {
+            transform: scale(1.05);
+        }
+        .learn-more-btn-icon {
+            font-size: 1.4rem;
+        }
+        
         .chatbot {
             position: fixed;
             bottom: 25px;
@@ -946,7 +974,6 @@ if (empty($user['department']) || $user['department'] === null) {
         .btn:hover {
             background: #B8000E;
         }
-        /* <CHANGE> Enhanced file upload styles with drag and drop support */
         .styled-file-container {
             margin-top: 10px;
         }
@@ -984,7 +1011,6 @@ if (empty($user['department']) || $user['department'] === null) {
         .styled-file-label.drag-over {
             border-color: #E60012;
             background: rgba(230, 0, 18, 0.1);
-            color: #E60012;
             border-style: solid;
         }
         .styled-file-label i {
@@ -1063,7 +1089,6 @@ if (empty($user['department']) || $user['department'] === null) {
         .remove-file-btn:hover {
             background: #c82333;
         }
-        /* </CHANGE> */
         .risk-categories-container {
             background: #f8f9fa;
             border: 1px solid #ddd;
@@ -1528,6 +1553,218 @@ if (empty($user['department']) || $user['department'] === null) {
             text-transform: uppercase;
         }
         
+        /* Updated Learn More modal header to red theme */
+        .learn-more-modal-header {
+            background: linear-gradient(135deg, #E60012 0%, #B8000E 100%); /* Changed color */
+        }
+        
+        /* Added tab navigation styling for Help Center sections */
+        .help-tabs {
+            display: flex;
+            border-bottom: 3px solid #e1e5e9;
+            margin-bottom: 2rem;
+            gap: 0;
+        }
+        
+        .help-tab {
+            flex: 1;
+            padding: 1rem 1.5rem;
+            background: #f8f9fa;
+            border: none;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            color: #666;
+            transition: all 0.3s ease;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -3px;
+            text-align: center;
+        }
+        
+        .help-tab:hover {
+            background: rgba(230, 0, 18, 0.05);
+            color: #E60012;
+        }
+        
+        .help-tab.active {
+            background: white;
+            color: #E60012;
+            border-bottom: 3px solid #E60012;
+        }
+        
+        .help-tab-content {
+            display: none;
+        }
+        
+        .help-tab-content.active {
+            display: block;
+        }
+        /* End of added tab navigation styling */
+        
+        .procedures-content {
+            padding: 1.5rem;
+            background: #f9f9f9;
+            border-radius: 8px;
+            margin-top: 1rem;
+        }
+        
+        .procedures-placeholder {
+            text-align: center;
+            padding: 3rem 2rem;
+            color: #666;
+        }
+        
+        .procedures-placeholder-icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+        }
+        
+        .procedures-placeholder h3 {
+            color: #333;
+            margin-bottom: 0.5rem;
+            font-size: 1.5rem;
+        }
+        
+        .procedures-placeholder p {
+            color: #999;
+            font-size: 0.95rem;
+        }
+        
+        /* Added Help Center and FAQ styling */
+        .help-section {
+            margin-bottom: 2rem;
+        }
+        
+        .help-section-title {
+            color: #E60012;
+            font-size: 1.4rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 3px solid #E60012;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .help-section-content {
+            color: #333;
+            line-height: 1.8;
+            font-size: 1rem;
+        }
+        
+        .help-section-content p {
+            margin-bottom: 1rem;
+        }
+        
+        .help-section-content ul {
+            margin-left: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .help-section-content li {
+            margin-bottom: 0.5rem;
+        }
+        
+        .step-guide-item {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            border-left: 4px solid #E60012;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .step-guide-item h4 {
+            color: #E60012;
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        
+        .step-guide-item p {
+            color: #555;
+            line-height: 1.6;
+            margin-bottom: 0.5rem;
+        }
+        
+        .faq-item {
+            background: white;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            overflow: hidden;
+            border: 2px solid #e1e5e9;
+            transition: all 0.3s ease;
+        }
+        
+        .faq-item:hover {
+            border-color: #E60012;
+        }
+        
+        .faq-question {
+            padding: 1.2rem 1.5rem;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f8f9fa;
+            transition: all 0.3s ease;
+        }
+        
+        .faq-question:hover {
+            background: rgba(230, 0, 18, 0.05);
+        }
+        
+        .faq-question h4 {
+            color: #333;
+            font-size: 1rem;
+            font-weight: 600;
+            margin: 0;
+            flex: 1;
+        }
+        
+        .faq-icon {
+            color: #E60012;
+            font-size: 1.5rem;
+            font-weight: bold;
+            transition: transform 0.3s ease;
+        }
+        
+        .faq-item.active .faq-icon {
+            transform: rotate(45deg);
+        }
+        
+        .faq-answer {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+            background: white;
+        }
+        
+        .faq-item.active .faq-answer {
+            max-height: 500px;
+        }
+        
+        .faq-answer-content {
+            padding: 1.5rem;
+            color: #555;
+            line-height: 1.8;
+            border-top: 1px solid #e1e5e9;
+        }
+        
+        .faq-answer-content p {
+            margin-bottom: 0.5rem;
+        }
+        
+        .faq-answer-content ul {
+            margin-left: 1.5rem;
+            margin-top: 0.5rem;
+        }
+        
+        .faq-answer-content li {
+            margin-bottom: 0.3rem;
+        }
+        
         @media (max-width: 768px) {
             body {
                 padding-top: 120px;
@@ -1610,6 +1847,19 @@ if (empty($user['department']) || $user['department'] === null) {
                 right: 10px;
                 left: 10px;
                 max-width: calc(100% - 20px);
+            }
+            /* Mobile adjustments for tabs */
+            .help-tabs {
+                flex-direction: column;
+                margin-bottom: 1rem;
+            }
+            .help-tab {
+                border-bottom: 3px solid transparent !important; /* Remove border */
+                margin-bottom: 0; /* Remove margin */
+                padding: 0.8rem 1rem; /* Adjust padding */
+            }
+            .help-tab.active {
+                border-bottom: 3px solid #E60012 !important; /* Re-apply border */
             }
         }
 
@@ -1907,7 +2157,7 @@ if (empty($user['department']) || $user['department'] === null) {
                         </div>
                     </div>
 
-                     <CHANGE> Multiple file upload with drag and drop 
+                     Multiple file upload with drag and drop 
                     <div class="form-group">
                         <label class="form-label">G. Supporting Documents * (Mandatory - Multiple files allowed)</label>
                         <div class="styled-file-container">
@@ -1928,11 +2178,10 @@ if (empty($user['department']) || $user['department'] === null) {
                             </div>
                             <small class="form-text text-muted" style="display: block; margin-top: 10px; color: #666; text-align: center;">
                                 <strong>Required:</strong> Please provide screenshots, images, PDFs, Excel sheets, email trails, or other relevant documentation<br>
-                                Accepted formats: PDF, DOC, DOCX, JPG, JPEG, PNG, TXT, XLSX, XLS, MSG, EML (Max size: 10MB per file)
+                                Accepted formats: PDF, DOC, DOCX, JPG, PNG, XLSX, XLS, MSG, EML (Max size: 10MB per file)
                             </small>
                         </div>
                     </div>
-                     </CHANGE> 
 
                     <button type="submit" name="submit_risk" style="background: #E60012; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; width: 100%; font-weight: 600;">
                         Submit Risk Identification
@@ -1993,7 +2242,7 @@ if (empty($user['department']) || $user['department'] === null) {
                     <div class="modal-info-display" id="modalCauseOfRisk"></div>
                 </div>
                 <div class="form-group">
-                    <label>Involves Money Loss:</label>
+                    <label>Does your risk involves loss of money?</label>
                     <div class="modal-info-display" id="modalMoneyLoss"></div>
                 </div>
                 <div class="form-group" id="moneyRangeSection" style="display: none;">
@@ -2001,7 +2250,7 @@ if (empty($user['department']) || $user['department'] === null) {
                     <div class="modal-info-display" id="modalMoneyRange"></div>
                 </div>
                 <div class="form-group">
-                    <label>Reported to GLPI:</label>
+                    <label>Have you reported to GLPI?</label>
                     <div class="modal-info-display" id="modalGLPI"></div>
                 </div>
                 <div class="form-group" id="glpiNumberSection" style="display: none;">
@@ -2027,6 +2276,343 @@ if (empty($user['department']) || $user['department'] === null) {
         </div>
     </div>
 
+     
+    <div id="learnMoreModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header learn-more-modal-header">
+                <h3 class="modal-title">Help Center and FAQs</h3>
+                <button class="close" onclick="closeLearnMoreModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="procedures-content">
+                    
+                    <div class="help-tabs">
+                        <button class="help-tab active" onclick="switchHelpTab(event, 'gettingStarted')">
+                            🚀 Getting Started
+                        </button>
+                        <button class="help-tab" onclick="switchHelpTab(event, 'stepByStep')">
+                            📋 Step-by-Step Guide
+                        </button>
+                        <button class="help-tab" onclick="switchHelpTab(event, 'faqs')">
+                            ❓ FAQs
+                        </button>
+                    </div>
+                    
+                    <div id="gettingStarted" class="help-tab-content active">
+                        <div class="help-section">
+                            <h3 class="help-section-title">
+                                <span>🚀</span>
+                                Getting Started
+                            </h3>
+                            <div class="help-section-content">
+                                <p><strong>Welcome to Airtel Risk Management System</strong></p>
+                                <p>This system is designed to help you identify, report, and manage risks within your department. Risk management is everyone's responsibility, and your active participation helps protect Airtel's operations, reputation, and financial stability.</p>
+                                
+                                <p><strong>What is Risk Management?</strong></p>
+                                <p>Risk management is the process of identifying potential threats or issues that could negatively impact Airtel's business operations, then taking steps to minimize or eliminate those risks.</p>
+                                
+                                <p><strong>Why Report Risks?</strong></p>
+                                <ul>
+                                    <li><strong>Protect the Business:</strong> Early identification prevents small issues from becoming major problems</li>
+                                    <li><strong>Compliance:</strong> Meet regulatory requirements and internal policies</li>
+                                    <li><strong>Financial Safety:</strong> Reduce potential financial losses and operational disruptions</li>
+                                    <li><strong>Customer Trust:</strong> Maintain service quality and customer satisfaction</li>
+                                    <li><strong>Continuous Improvement:</strong> Learn from incidents to strengthen processes</li>
+                                </ul>
+                                
+                                <p><strong>Your Role as Staff:</strong></p>
+                                <p>As an Airtel staff member, you are the eyes and ears of the organization. You are expected to:</p>
+                                <ul>
+                                    <li>Identify and report any risks or incidents you encounter</li>
+                                    <li>Provide accurate and timely information</li>
+                                    <li>Attach supporting documentation (screenshots, emails, reports)</li>
+                                    <li>Follow up on reported risks when required</li>
+                                    <li>Cooperate with risk owners during investigations</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div id="stepByStep" class="help-tab-content">
+                        <div class="help-section">
+                            <h3 class="help-section-title">
+                                <span>📋</span>
+                                Step-by-Step Guide
+                            </h3>
+                            <div class="help-section-content">
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 1: Click "Report New Risk"</h4>
+                                    <p>On your dashboard, click the red "Report New Risk" button to open the risk reporting form.</p>
+                                </div>
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 2: Select Risk Category</h4>
+                                    <p>Choose ONE primary risk category that best describes your incident:</p>
+                                    <ul>
+                                        <li><strong>Financial Exposure:</strong> Revenue loss, unexpected costs, budget overruns</li>
+                                        <li><strong>Customer Experience:</strong> Service disruptions, complaints, poor service quality</li>
+                                        <li><strong>Compliance:</strong> Regulatory violations, policy breaches</li>
+                                        <li><strong>Fraud:</strong> Suspected fraudulent activities, theft, misconduct</li>
+                                        <li><strong>Operations:</strong> Business continuity issues, process failures</li>
+                                        <li><strong>Networks:</strong> Network outages, connectivity problems</li>
+                                        <li><strong>IT:</strong> Cybersecurity breaches, data privacy issues, system failures</li>
+                                        <li><strong>People:</strong> Staff-related issues, human errors</li>
+                                    </ul>
+                                </div>
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 3: Enter Date of Occurrence</h4>
+                                    <p>Select the exact date when the risk or incident occurred. This helps track patterns and response times.</p>
+                                </div>
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 4: Indicate Money Loss</h4>
+                                    <p>Specify if the risk involves financial loss. If yes, select the estimated amount range. This helps prioritize risks and allocate resources.</p>
+                                </div>
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 5: Describe the Risk</h4>
+                                    <p>Provide a clear, detailed description including:</p>
+                                    <ul>
+                                        <li><strong>WHAT</strong> happened (the incident or risk)</li>
+                                        <li><strong>WHERE</strong> it occurred (location, department, system)</li>
+                                        <li><strong>WHEN</strong> it took place (date and time)</li>
+                                        <li><strong>HOW</strong> it happened (sequence of events)</li>
+                                        <li><strong>WHO</strong> was affected (customers, staff, systems)</li>
+                                    </ul>
+                                </div>
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 6: Identify Cause of Risk</h4>
+                                    <p>Select ONE category, then choose multiple specific causes within that category:</p>
+                                    <ul>
+                                        <li><strong>People:</strong> Human error, training gaps, negligence</li>
+                                        <li><strong>Process:</strong> Inadequate procedures, control deficiencies</li>
+                                        <li><strong>IT Systems:</strong> System failures, bugs, cybersecurity issues</li>
+                                        <li><strong>External Environment:</strong> Regulatory changes, natural disasters, vendor failures</li>
+                                    </ul>
+                                </div>
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 7: GLPI Reporting</h4>
+                                    <p>Indicate if you've already reported this incident to GLPI (IT ticketing system). If yes, provide the IR (Incident Report) number for cross-reference.</p>
+                                </div>
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 8: Upload Supporting Documents</h4>
+                                    <p><strong>MANDATORY:</strong> Attach at least one supporting document. This can include:</p>
+                                    <ul>
+                                        <li>Screenshots of errors or issues</li>
+                                        <li>Email trails or correspondence</li>
+                                        <li>Reports or data exports</li>
+                                        <li>Photos of physical incidents</li>
+                                        <li>Excel sheets with financial data</li>
+                                    </ul>
+                                    <p>You can drag and drop multiple files or click to browse. Accepted formats: PDF, DOC, DOCX, JPG, PNG, XLSX, XLS, MSG, EML (Max 10MB per file).</p>
+                                </div>
+                                
+                                <div class="step-guide-item">
+                                    <h4>Step 9: Submit and Track</h4>
+                                    <p>Click "Submit Risk Identification" to complete your report. You will receive a unique Risk ID and can track the status on your dashboard. A risk owner will be automatically assigned to investigate and manage the risk.</p>
+                                </div>
+                                
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div id="faqs" class="help-tab-content">
+                        <div class="help-section">
+                            <h3 class="help-section-title">
+                                <span>❓</span>
+                                Frequently Asked Questions
+                            </h3>
+                            <div class="help-section-content">
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>What is considered a risk?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>A risk is any event, situation, or condition that could potentially have a negative impact on Airtel's operations, finances, reputation, or ability to achieve business objectives. Risks can be:</p>
+                                            <ul>
+                                                <li><strong>Financial:</strong> Unexpected losses, revenue decline, fraud, theft, budget overruns</li>
+                                                <li><strong>Operational:</strong> System failures, process breakdowns, service disruptions, supply chain issues</li>
+                                                <li><strong>Compliance:</strong> Regulatory violations, policy breaches, legal issues, audit findings</li>
+                                                <li><strong>Reputational:</strong> Customer complaints, negative publicity, brand damage, social media crises</li>
+                                                <li><strong>Strategic:</strong> Market changes, competitive threats, technology disruptions</li>
+                                                <li><strong>Security:</strong> Cybersecurity breaches, data leaks, physical security incidents</li>
+                                                <li><strong>People:</strong> Staff misconduct, human errors, safety incidents, skill gaps</li>
+                                            </ul>
+                                            <p><strong>Examples of risks to report:</strong></p>
+                                            <ul>
+                                                <li>A system outage affecting customer services</li>
+                                                <li>Discovery of fraudulent transactions</li>
+                                                <li>Customer data accidentally exposed or leaked</li>
+                                                <li>Repeated process failures causing delays</li>
+                                                <li>Non-compliance with regulatory requirements</li>
+                                                <li>Vendor failing to deliver critical services</li>
+                                                <li>Network infrastructure vulnerabilities</li>
+                                            </ul>
+                                            <p><strong>Remember:</strong> If something could harm Airtel's business, customers, or employees, it should be reported as a risk.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>What should I do if I'm not sure whether something is a risk?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>When in doubt, report it! It's better to report a potential risk that turns out to be minor than to miss a significant issue. The risk management team will assess the severity and take appropriate action. Remember: "If you see something, say something."</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>How long does it take for a risk to be assigned to a risk owner?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>Risk assignment is automated and happens immediately after you submit your report. The system automatically assigns the risk to a designated risk owner in your department based on the risk category. You will see the assignment status on your dashboard.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>Can I report a risk anonymously?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>No, all risk reports are linked to your user account for accountability and follow-up purposes. However, your identity is only visible to authorized personnel (risk owners, managers, and the risk management team). This ensures proper investigation while maintaining confidentiality.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>What happens after I submit a risk report?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>After submission:</p>
+                                            <ul>
+                                                <li>You receive a unique Risk ID for tracking</li>
+                                                <li>The system automatically assigns a risk owner</li>
+                                                <li>The risk owner reviews your report and supporting documents</li>
+                                                <li>They may contact you for additional information</li>
+                                                <li>The risk is assessed, analyzed, and appropriate actions are taken</li>
+                                                <li>You can track the status on your dashboard</li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>Why is uploading supporting documents mandatory?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>Supporting documents provide evidence and context that help risk owners understand the situation better. They enable faster investigation, accurate assessment, and proper resolution. Documents like screenshots, emails, and reports serve as proof and help identify root causes more effectively.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>Can I edit or delete a risk report after submission?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>No, once submitted, risk reports cannot be edited or deleted to maintain data integrity and audit trails. If you need to add information or correct details, contact your risk owner or the risk management team with your Risk ID. They can add notes or updates to your report.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>What is the difference between reporting to GLPI and the Risk Management System?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p><strong>GLPI</strong> is for IT-related incidents and service requests (system issues, access problems, technical support).</p>
+                                            <p><strong>Risk Management System</strong> is for broader organizational risks including financial, operational, compliance, fraud, and strategic risks.</p>
+                                            <p>Some incidents may require reporting to both systems. If you've already reported to GLPI, provide the IR number in your risk report for cross-reference.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>How do I know if my risk report has been reviewed?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>Check your dashboard regularly to see the status of your reported risks. The system shows whether a risk owner has been assigned and the current status. You may also be contacted directly by the risk owner if they need additional information or updates.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>What should I include in the risk description?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>A good risk description should be clear, specific, and comprehensive. Include:</p>
+                                            <ul>
+                                                <li><strong>Context:</strong> What was happening before the incident?</li>
+                                                <li><strong>The Incident:</strong> What exactly occurred?</li>
+                                                <li><strong>Impact:</strong> Who or what was affected? How many customers/systems?</li>
+                                                <li><strong>Timeline:</strong> When did it start? How long did it last?</li>
+                                                <li><strong>Location:</strong> Which branch, system, or department?</li>
+                                                <li><strong>Current Status:</strong> Is it ongoing or resolved?</li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="faq-item" onclick="toggleFAQ(this)">
+                                    <div class="faq-question">
+                                        <h4>Who can I contact if I need help with the system?</h4>
+                                        <span class="faq-icon">+</span>
+                                    </div>
+                                    <div class="faq-answer">
+                                        <div class="faq-answer-content">
+                                            <p>For technical issues with the Risk Management System, contact the IT Support team via GLPI. For questions about risk reporting procedures or risk management policies, contact your department's risk owner or the Risk Management team directly.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                            </div>
+                        </div>
+                    </div>
+                    
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <button class="learn-more-btn" onclick="openLearnMoreModal()" title="Learn More - Staff Procedures">
+        <span class="learn-more-btn-icon">📚</span>
+        <span>Learn More</span>
+    </button>
+    
     <div class="chatbot" onclick="openChatbot()" title="Need help? Click to chat">💬</div>
 
     <script>
@@ -2093,10 +2679,17 @@ if (empty($user['department']) || $user['department'] === null) {
         let activeCategory = '';
         let currentCategory = '';
         let selections = [];
-        
-        // <CHANGE> Store files in an array for accumulation
         let selectedFiles = [];
-        // </CHANGE>
+        
+        function openLearnMoreModal() {
+            document.getElementById('learnMoreModal').classList.add('show');
+            document.getElementById('learnMoreModal').style.display = 'flex';
+        }
+
+        function closeLearnMoreModal() {
+            document.getElementById('learnMoreModal').classList.remove('show');
+            document.getElementById('learnMoreModal').style.display = 'none';
+        }
         
         function openCauseModal(category) {
             if (activeCategory !== category) {
@@ -2261,7 +2854,6 @@ if (empty($user['department']) || $user['department'] === null) {
             }
         });
 
-        // <CHANGE> Enhanced file upload with drag and drop functionality that accumulates files
         function displayFileName() {
             const filesList = document.getElementById('selectedFilesList');
             const filesContainer = document.getElementById('filesContainer');
@@ -2287,14 +2879,12 @@ if (empty($user['department']) || $user['department'] === null) {
             }
         }
 
-        // Remove a specific file from the list
         function removeFile(index) {
             selectedFiles.splice(index, 1);
             updateFileInput();
             displayFileName();
         }
 
-        // Update the file input with accumulated files
         function updateFileInput() {
             const fileInput = document.getElementById('fileInput');
             const dt = new DataTransfer();
@@ -2304,7 +2894,6 @@ if (empty($user['department']) || $user['department'] === null) {
             fileInput.files = dt.files;
         }
 
-        // Drag and drop functionality
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
 
@@ -2339,19 +2928,15 @@ if (empty($user['department']) || $user['department'] === null) {
             const dt = e.dataTransfer;
             const newFiles = dt.files;
             
-            // Add new files to existing files array
             for (let i = 0; i < newFiles.length; i++) {
                 selectedFiles.push(newFiles[i]);
             }
             
-            // Update the file input with all files
             updateFileInput();
             displayFileName();
         }
 
-        // Handle file input change (click to browse)
         fileInput.addEventListener('change', function() {
-            // Add newly selected files to the array
             const newFiles = this.files;
             for (let i = 0; i < newFiles.length; i++) {
                 selectedFiles.push(newFiles[i]);
@@ -2360,7 +2945,6 @@ if (empty($user['department']) || $user['department'] === null) {
             updateFileInput();
             displayFileName();
         });
-        // </CHANGE>
 
         document.addEventListener('DOMContentLoaded', function() {
             const successNotification = document.getElementById('successNotification');
@@ -2427,10 +3011,8 @@ if (empty($user['department']) || $user['department'] === null) {
             document.getElementById('reportModal').style.display = 'flex';
             activeCategory = '';
             selections = [];
-            // <CHANGE> Reset file selections when opening modal
             selectedFiles = [];
             displayFileName();
-            // </CHANGE>
             document.querySelectorAll('.cause-card').forEach(card => {
                 card.classList.remove('has-selections');
             });
@@ -2623,6 +3205,7 @@ if (empty($user['department']) || $user['department'] === null) {
             const reportModal = document.getElementById('reportModal');
             const riskModal = document.getElementById('riskModal');
             const causeModal = document.getElementById('causeModal');
+            const learnMoreModal = document.getElementById('learnMoreModal');
             
             if (event.target == reportModal) {
                 closeReportModal();
@@ -2633,7 +3216,28 @@ if (empty($user['department']) || $user['department'] === null) {
             if (event.target == causeModal) {
                 closeCauseModal();
             }
+            if (event.target == learnMoreModal) {
+                closeLearnMoreModal();
+            }
         }
+
+        function toggleFAQ(element) {
+            element.classList.toggle('active');
+        }
+        
+        function switchHelpTab(event, tabId) {
+            // Remove active class from all tabs and tab contents
+            const tabs = document.querySelectorAll('.help-tab');
+            const tabContents = document.querySelectorAll('.help-tab-content');
+            
+            tabs.forEach(tab => tab.classList.remove('active'));
+            tabContents.forEach(content => content.classList.remove('active'));
+            
+            // Add active class to clicked tab and corresponding content
+            event.currentTarget.classList.add('active');
+            document.getElementById(tabId).classList.add('active');
+        }
+
     </script>
 </body>
 </html>
