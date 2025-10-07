@@ -6,8 +6,6 @@ include_once 'includes/auto_assignment.php';
 
 $database = new Database();
 $db = $database->getConnection();
-
-
 function generateRiskId($db, $department) {
     try {
         // Get department initial from departments table
@@ -40,6 +38,7 @@ function generateRiskId($db, $department) {
         $count_stmt->bindParam(':month', $month);
         $count_stmt->execute();
         
+        // FIX: Corrected fetch method to use $count_stmt instead of $stmt
         $count_result = $count_stmt->fetch(PDO::FETCH_ASSOC);
         $sequential_number = $count_result['count'] + 1;
         
@@ -53,6 +52,8 @@ function generateRiskId($db, $department) {
         return null;
     }
 }
+
+// ... existing code ...
 
 if (isset($_POST['submit_risk'])) {
     try {
@@ -126,10 +127,10 @@ if (isset($_POST['submit_risk'])) {
         }
         $department = $user['department'] ?? 'General';
 
-        // Handle file upload (mandatory)
-        $uploaded_file_path = null;
-        if (!isset($_FILES['supporting_document']) || $_FILES['supporting_document']['error'] !== UPLOAD_ERR_OK) {
-            throw new Exception("Supporting document is mandatory. Please upload a file.");
+        // Handle multiple file uploads (mandatory - at least one file required)
+        $uploaded_files = [];
+        if (!isset($_FILES['supporting_document']) || empty($_FILES['supporting_document']['name'][0])) {
+            throw new Exception("At least one supporting document is mandatory. Please upload a file.");
         }
         
         $upload_dir = 'uploads/risk_documents/';
@@ -137,24 +138,47 @@ if (isset($_POST['submit_risk'])) {
             mkdir($upload_dir, 0755, true);
         }
         
-        $file_extension = strtolower(pathinfo($_FILES['supporting_document']['name'], PATHINFO_EXTENSION));
         $allowed_extensions = ['pdf', 'doc', 'docx', 'txt', 'jpg', 'jpeg', 'png', 'xlsx', 'xls', 'msg', 'eml'];
         $max_file_size = 10 * 1024 * 1024; // 10MB
         
-        if (!in_array($file_extension, $allowed_extensions)) {
-            throw new Exception("Invalid file type. Please upload PDF, DOC, DOCX, TXT, JPG, PNG, Excel, or email files.");
+        // Process each uploaded file
+        $file_count = count($_FILES['supporting_document']['name']);
+        for ($i = 0; $i < $file_count; $i++) {
+            // Skip if no file or error
+            if ($_FILES['supporting_document']['error'][$i] !== UPLOAD_ERR_OK) {
+                if ($_FILES['supporting_document']['error'][$i] === UPLOAD_ERR_NO_FILE) {
+                    continue; // Skip empty file slots
+                }
+                throw new Exception("Error uploading file: " . $_FILES['supporting_document']['name'][$i]);
+            }
+            
+            $file_extension = strtolower(pathinfo($_FILES['supporting_document']['name'][$i], PATHINFO_EXTENSION));
+            
+            if (!in_array($file_extension, $allowed_extensions)) {
+                throw new Exception("Invalid file type for " . $_FILES['supporting_document']['name'][$i] . ". Please upload PDF, DOC, DOCX, TXT, JPG, PNG, Excel, or email files.");
+            }
+            
+            if ($_FILES['supporting_document']['size'][$i] > $max_file_size) {
+                throw new Exception("File " . $_FILES['supporting_document']['name'][$i] . " is too large. Please upload files under 10MB.");
+            }
+            
+            $file_name = uniqid() . '_' . time() . '_' . $i . '.' . $file_extension;
+            $upload_path = $upload_dir . $file_name;
+            
+            if (!move_uploaded_file($_FILES['supporting_document']['tmp_name'][$i], $upload_path)) {
+                throw new Exception("Failed to upload " . $_FILES['supporting_document']['name'][$i]);
+            }
+            
+            $uploaded_files[] = [
+                'path' => $upload_path,
+                'original_name' => $_FILES['supporting_document']['name'][$i],
+                'size' => $_FILES['supporting_document']['size'][$i]
+            ];
         }
         
-        if ($_FILES['supporting_document']['size'] > $max_file_size) {
-            throw new Exception("File too large. Please upload files under 10MB.");
+        if (empty($uploaded_files)) {
+            throw new Exception("At least one supporting document is mandatory. Please upload a file.");
         }
-        
-        $file_name = uniqid() . '_' . time() . '.' . $file_extension;
-        $upload_path = $upload_dir . $file_name;
-        if (!move_uploaded_file($_FILES['supporting_document']['tmp_name'], $upload_path)) {
-            throw new Exception("Failed to upload supporting document.");
-        }
-        $uploaded_file_path = $upload_path;
 
         // Verify user session and database user
         if (!isset($_SESSION['user_id']) || empty($_SESSION['user_id'])) {
@@ -251,15 +275,11 @@ if (isset($_POST['submit_risk'])) {
             throw new Exception("Failed to generate risk ID.");
         }
         
-        // Handle document upload
-        if ($uploaded_file_path) {
-            $file_content = file_get_contents($uploaded_file_path);
-            $finfo = finfo_open(FILEINFO_MIME_TYPE);
-            $mime_type = finfo_file($finfo, $uploaded_file_path);
-            finfo_close($finfo);
-            
+        // Insert all uploaded files into database
+        if (!empty($uploaded_files)) {
             $doc_query = "INSERT INTO risk_documents (
-                            risk_id, 
+                            risk_id,
+                            unique_risk_id,
                             section_type, 
                             original_filename, 
                             stored_filename, 
@@ -270,8 +290,9 @@ if (isset($_POST['submit_risk'])) {
                             uploaded_by, 
                             uploaded_at
                           ) VALUES (
-                            :risk_id, 
-                            'risk_identification', 
+                            :risk_id,
+                            :unique_risk_id,
+                            'supporting_documents', 
                             :original_filename, 
                             :stored_filename, 
                             :file_path, 
@@ -283,21 +304,28 @@ if (isset($_POST['submit_risk'])) {
                           )";
             
             $doc_stmt = $db->prepare($doc_query);
-            $original_filename = $_FILES['supporting_document']['name'];
-            $stored_filename = basename($uploaded_file_path);
-            $file_size = $_FILES['supporting_document']['size'];
             
-            $doc_stmt->bindParam(':risk_id', $risk_incident_id);
-            $doc_stmt->bindParam(':original_filename', $original_filename);
-            $doc_stmt->bindParam(':stored_filename', $stored_filename);
-            $doc_stmt->bindParam(':file_path', $uploaded_file_path);
-            $doc_stmt->bindParam(':file_size', $file_size);
-            $doc_stmt->bindParam(':document_content', $file_content, PDO::PARAM_LOB);
-            $doc_stmt->bindParam(':mime_type', $mime_type);
-            $doc_stmt->bindParam(':uploaded_by', $user_id);
-            
-            if (!$doc_stmt->execute()) {
-                throw new Exception("Failed to upload supporting document.");
+            foreach ($uploaded_files as $file) {
+                $file_content = file_get_contents($file['path']);
+                $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                $mime_type = finfo_file($finfo, $file['path']);
+                finfo_close($finfo);
+                
+                $stored_filename = basename($file['path']);
+                
+                $doc_stmt->bindParam(':risk_id', $risk_incident_id);
+                $doc_stmt->bindParam(':unique_risk_id', $generated_risk_id);
+                $doc_stmt->bindParam(':original_filename', $file['original_name']);
+                $doc_stmt->bindParam(':stored_filename', $stored_filename);
+                $doc_stmt->bindParam(':file_path', $file['path']);
+                $doc_stmt->bindParam(':file_size', $file['size']);
+                $doc_stmt->bindParam(':document_content', $file_content, PDO::PARAM_LOB);
+                $doc_stmt->bindParam(':mime_type', $mime_type);
+                $doc_stmt->bindParam(':uploaded_by', $user_id);
+                
+                if (!$doc_stmt->execute()) {
+                    throw new Exception("Failed to upload supporting document: " . $file['original_name']);
+                }
             }
         }
         
@@ -332,14 +360,40 @@ if (isset($_POST['submit_risk'])) {
     }
 }
 
+// ... existing code ...
+
+if (isset($_GET['download_document']) && isset($_GET['doc_id'])) {
+    $doc_id = $_GET['doc_id'];
+    
+    $doc_query = "SELECT document_content, original_filename, mime_type 
+                  FROM risk_documents 
+                  WHERE id = :doc_id";
+    $doc_stmt = $db->prepare($doc_query);
+    $doc_stmt->bindParam(':doc_id', $doc_id);
+    $doc_stmt->execute();
+    $document = $doc_stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if ($document) {
+        header('Content-Type: ' . $document['mime_type']);
+        header('Content-Disposition: attachment; filename="' . $document['original_filename'] . '"');
+        header('Content-Length: ' . strlen($document['document_content']));
+        echo $document['document_content'];
+        exit;
+    } else {
+        http_response_code(404);
+        echo "Document not found";
+        exit;
+    }
+}
+
 // Handle success messages from redirect
 if (isset($_GET['success'])) {
     switch ($_GET['success']) {
         case 'assigned':
-            $success_message = "Risk reported and immediately assigned to your designated risk owner!";
+            $success_message = "Risk succesfuly assigned to risk owner!";
             break;
         case 'no_owner_designated':
-            $success_message = "Risk reported successfully! No designated risk owner found for your account. Please contact your administrator.";
+            $success_message = "Risk reported successfully, No risk owner found. Contact IT admin.";
             break;
         case 'reported':
             $success_message = "Risk reported successfully! Assignment in progress.";
@@ -353,9 +407,9 @@ if (isset($_GET['success'])) {
 $query = "SELECT r.*, 
                  u.username as reporter_username,
                  u.full_name as reporter_full_name,
-                 (SELECT COUNT(*) FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification') as has_document,
-                 (SELECT rd.file_path FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification' LIMIT 1) as document_path,
-                 (SELECT rd.original_filename FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type = 'risk_identification' LIMIT 1) as document_filename
+                 (SELECT COUNT(*) FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type IN ('risk_identification', 'supporting_documents')) as has_document,
+                 (SELECT rd.file_path FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type IN ('risk_identification', 'supporting_documents') LIMIT 1) as document_path,
+                 (SELECT rd.original_filename FROM risk_documents rd WHERE rd.risk_id = r.id AND rd.section_type IN ('risk_identification', 'supporting_documents') LIMIT 1) as document_filename
           FROM risk_incidents r 
           LEFT JOIN users u ON r.reported_by = u.id
           WHERE r.reported_by = :user_id 
@@ -365,6 +419,20 @@ $stmt = $db->prepare($query);
 $stmt->bindParam(':user_id', $_SESSION['user_id']);
 $stmt->execute();
 $user_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+foreach ($user_risks as &$risk) {
+    $docs_query = "SELECT rd.id, rd.original_filename, rd.file_size, rd.mime_type, rd.uploaded_at, u.full_name as uploader_name 
+                   FROM risk_documents rd 
+                   LEFT JOIN users u ON rd.uploaded_by = u.id
+                   WHERE rd.unique_risk_id = :unique_risk_id 
+                   AND rd.section_type = 'supporting_documents'
+                   ORDER BY rd.uploaded_at DESC";
+    $docs_stmt = $db->prepare($docs_query);
+    $docs_stmt->bindParam(':unique_risk_id', $risk['risk_id']); 
+    $docs_stmt->execute();
+    $risk['supporting_documents'] = $docs_stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+unset($risk);
 
 // Get current user info with department from database
 $user = getCurrentUser();
@@ -400,6 +468,7 @@ if (empty($user['department']) || $user['department'] === null) {
             min-height: 100vh;
             padding-top: 100px;
         }
+
         .dashboard {
             min-height: 100vh;
         }
@@ -877,6 +946,7 @@ if (empty($user['department']) || $user['department'] === null) {
         .btn:hover {
             background: #B8000E;
         }
+        /* <CHANGE> Enhanced file upload styles with drag and drop support */
         .styled-file-container {
             margin-top: 10px;
         }
@@ -891,26 +961,109 @@ if (empty($user['department']) || $user['department'] === null) {
         }
         .styled-file-label {
             display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
             gap: 10px;
-            padding: 15px 20px;
-            border: 2px dashed #ddd;
-            border-radius: 8px;
+            padding: 30px 20px;
+            border: 3px dashed #ddd;
+            border-radius: 12px;
             background: #f8f9fa;
             cursor: pointer;
             transition: all 0.3s ease;
             color: #666;
             font-size: 1rem;
+            min-height: 150px;
         }
         .styled-file-label:hover {
             border-color: #E60012;
             background: rgba(230, 0, 18, 0.05);
             color: #E60012;
+            transform: translateY(-2px);
+        }
+        .styled-file-label.drag-over {
+            border-color: #E60012;
+            background: rgba(230, 0, 18, 0.1);
+            color: #E60012;
+            border-style: solid;
         }
         .styled-file-label i {
             font-size: 1.5rem;
         }
+        .file-upload-icon {
+            font-size: 3rem;
+            color: #E60012;
+            margin-bottom: 10px;
+        }
+        .file-upload-text {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .file-upload-subtext {
+            font-size: 0.9rem;
+            color: #666;
+        }
+        .selected-files-list {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #E60012;
+            display: none;
+        }
+        .selected-files-list.show {
+            display: block;
+        }
+        .selected-files-title {
+            font-weight: 600;
+            color: #E60012;
+            margin-bottom: 10px;
+            font-size: 0.95rem;
+        }
+        .selected-file-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: white;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            border: 1px solid #e1e5e9;
+        }
+        .selected-file-item:last-child {
+            margin-bottom: 0;
+        }
+        .selected-file-name {
+            font-size: 0.9rem;
+            color: #333;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .selected-file-size {
+            font-size: 0.85rem;
+            color: #666;
+            margin-left: 10px;
+            margin-right: 10px;
+        }
+        .remove-file-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+        .remove-file-btn:hover {
+            background: #c82333;
+        }
+        /* </CHANGE> */
         .risk-categories-container {
             background: #f8f9fa;
             border: 1px solid #ddd;
@@ -1305,6 +1458,76 @@ if (empty($user['department']) || $user['department'] === null) {
             background: #B8000E;
         }
         
+        .documents-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .documents-table thead {
+            background: #E60012;
+            color: white;
+        }
+
+        .documents-table th {
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .documents-table td {
+            padding: 12px;
+            border-bottom: 1px solid #e1e5e9;
+            font-size: 0.9rem;
+        }
+
+        .documents-table tbody tr:hover {
+            background: #f8f9fa;
+        }
+
+        .documents-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .doc-download-link {
+            color: #E60012;
+            text-decoration: none;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .doc-download-link:hover {
+            text-decoration: underline;
+        }
+
+        .doc-icon {
+            width: 16px;
+            height: 16px;
+        }
+
+        .file-size-badge {
+            background: #f0f0f0;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #666;
+        }
+
+        .mime-type-badge {
+            background: #E60012;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+        }
+        
         @media (max-width: 768px) {
             body {
                 padding-top: 120px;
@@ -1389,6 +1612,7 @@ if (empty($user['department']) || $user['department'] === null) {
                 max-width: calc(100% - 20px);
             }
         }
+
     </style>
 </head>
 <body>
@@ -1462,7 +1686,7 @@ if (empty($user['department']) || $user['department'] === null) {
                                         <div class="risk-id"><?php echo htmlspecialchars($risk['risk_id'] ?? 'Pending'); ?></div>
                                         <div class="risk-name"><?php echo htmlspecialchars($risk['risk_name']); ?></div>
                                     </div>
-                                    <button class="view-btn" onclick='viewRisk(<?php echo json_encode($risk); ?>)'>
+                                    <button class="view-btn" onclick='viewRisk(<?php echo json_encode($risk, JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'>
                                         View
                                     </button>
                                 </div>
@@ -1486,7 +1710,6 @@ if (empty($user['department']) || $user['department'] === null) {
         </main>
     </div>
     
-     <!-- Report New Risk Modal -->
     <div id="reportModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -1573,6 +1796,7 @@ if (empty($user['department']) || $user['department'] === null) {
                             </div>
                         </div>
                     </div>
+
 
                     <div class="form-group">
                         <label class="form-label">B. Date of Occurrence *</label>
@@ -1683,24 +1907,32 @@ if (empty($user['department']) || $user['department'] === null) {
                         </div>
                     </div>
 
+                     <CHANGE> Multiple file upload with drag and drop 
                     <div class="form-group">
-                        <label class="form-label">G. Supporting Documents * (Mandatory)</label>
+                        <label class="form-label">G. Supporting Documents * (Mandatory - Multiple files allowed)</label>
                         <div class="styled-file-container">
                             <div class="styled-file-upload">
-                                <input type="file" name="supporting_document" class="styled-file-input" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.txt,.xlsx,.xls,.msg,.eml" required id="fileInput" onchange="displayFileName()">
-                                <label class="styled-file-label" for="fileInput">
-                                    <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <input type="file" name="supporting_document[]" class="styled-file-input" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.txt,.xlsx,.xls,.msg,.eml" required id="fileInput" multiple>
+                                <label class="styled-file-label" for="fileInput" id="dropZone">
+                                    <div class="file-upload-icon">📁</div>
+                                    <div class="file-upload-text">Drag & Drop files here</div>
+                                    <div class="file-upload-subtext">or click to browse</div>
+                                    <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-top: 10px;">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
                                     </svg>
-                                    <span id="fileLabel">Click to upload supporting document</span>
                                 </label>
+                            </div>
+                            <div class="selected-files-list" id="selectedFilesList">
+                                <div class="selected-files-title">Selected Files:</div>
+                                <div id="filesContainer"></div>
                             </div>
                             <small class="form-text text-muted" style="display: block; margin-top: 10px; color: #666; text-align: center;">
                                 <strong>Required:</strong> Please provide screenshots, images, PDFs, Excel sheets, email trails, or other relevant documentation<br>
-                                Accepted formats: PDF, DOC, DOCX, JPG, JPEG, PNG, TXT, XLSX, XLS, MSG, EML (Max size: 10MB)
+                                Accepted formats: PDF, DOC, DOCX, JPG, JPEG, PNG, TXT, XLSX, XLS, MSG, EML (Max size: 10MB per file)
                             </small>
                         </div>
                     </div>
+                     </CHANGE> 
 
                     <button type="submit" name="submit_risk" style="background: #E60012; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; width: 100%; font-weight: 600;">
                         Submit Risk Identification
@@ -1784,15 +2016,11 @@ if (empty($user['department']) || $user['department'] === null) {
                     <label>Assignment Status:</label>
                     <div class="modal-info-display" id="modalAssignmentStatus"></div>
                 </div>
-                <div class="form-group" id="documentSection" style="display: none;">
-                    <label>Supporting Document:</label>
-                    <div class="modal-info-display">
-                        <a href="#" id="documentLink" class="document-link" target="_blank">
-                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/>
-                            </svg>
-                            View Document
-                        </a>
+                
+                <div class="form-group" id="supportingDocumentsSection">
+                    <label>Supporting Documents:</label>
+                    <div id="supportingDocumentsList" class="modal-info-display">
+                        <p style="color: #666; font-style: italic;">No supporting documents available</p>
                     </div>
                 </div>
             </div>
@@ -1862,24 +2090,53 @@ if (empty($user['department']) || $user['department'] === null) {
             }
         };
         
-        let currentCategory = '';
         let activeCategory = '';
+        let currentCategory = '';
         let selections = [];
+        
+        // <CHANGE> Store files in an array for accumulation
+        let selectedFiles = [];
+        // </CHANGE>
         
         function openCauseModal(category) {
             if (activeCategory !== category) {
-                activeCategory = category;
-                selections = [];
-                document.querySelectorAll('.cause-card').forEach(card => {
-                    card.classList.remove('has-selections');
+                const categories = ['people', 'process', 'itSystems', 'external'];
+                categories.forEach(cat => {
+                    if (cat !== category) {
+                        const hiddenId = 'cause_' + (cat === 'itSystems' ? 'it_systems' : cat) + '_hidden';
+                        const hiddenInput = document.getElementById(hiddenId);
+                        if (hiddenInput) {
+                            hiddenInput.value = '[]';
+                        }
+                        
+                        const cardElement = document.getElementById(cat + 'Card');
+                        const countElement = document.getElementById(cat + 'Count');
+                        if (cardElement) {
+                            cardElement.classList.remove('has-selections');
+                        }
+                        if (countElement) {
+                            countElement.textContent = '0 selected';
+                        }
+                    }
                 });
-                document.getElementById('peopleCount').textContent = '0 selected';
-                document.getElementById('processCount').textContent = '0 selected';
-                document.getElementById('itSystemsCount').textContent = '0 selected';
-                document.getElementById('externalCount').textContent = '0 selected';
             }
             
+            activeCategory = category;
             currentCategory = category;
+            
+            const hiddenInputId = 'cause_' + (category === 'itSystems' ? 'it_systems' : category) + '_hidden';
+            const hiddenInput = document.getElementById(hiddenInputId);
+            
+            if (hiddenInput && hiddenInput.value) {
+                try {
+                    selections = JSON.parse(hiddenInput.value);
+                } catch (e) {
+                    selections = [];
+                }
+            } else {
+                selections = [];
+            }
+            
             const data = causeData[category];
             
             document.getElementById('causeModalTitle').innerHTML = data.icon + ' ' + data.title;
@@ -1912,25 +2169,40 @@ if (empty($user['department']) || $user['department'] === null) {
                 modalBody.appendChild(checkboxItem);
             });
             
-            document.getElementById('causeModal').classList.add('show');
+            const modal = document.getElementById('causeModal');
+            modal.style.display = 'flex';
+            modal.classList.add('show');
         }
         
         function closeCauseModal() {
             document.getElementById('causeModal').classList.remove('show');
+            document.getElementById('causeModal').style.display = 'none';
         }
         
         function saveCauseSelections() {
             const checkboxes = document.querySelectorAll('#causeModalBody input[type="checkbox"]:checked');
             selections = Array.from(checkboxes).map(cb => cb.value);
             
-            updateCauseCard(currentCategory);
             updateHiddenInputs();
+            updateCauseCard(currentCategory);
             updateSelectionSummary();
             closeCauseModal();
         }
         
         function updateCauseCard(category) {
-            const count = selections.length;
+            const hiddenInputId = 'cause_' + (category === 'itSystems' ? 'it_systems' : category) + '_hidden';
+            const hiddenInput = document.getElementById(hiddenInputId);
+            let count = 0;
+            
+            if (hiddenInput && hiddenInput.value) {
+                try {
+                    const savedSelections = JSON.parse(hiddenInput.value);
+                    count = savedSelections.length;
+                } catch (e) {
+                    count = 0;
+                }
+            }
+            
             const countElement = document.getElementById(category + 'Count');
             const cardElement = document.getElementById(category + 'Card');
             
@@ -1944,30 +2216,37 @@ if (empty($user['department']) || $user['department'] === null) {
         }
         
         function updateHiddenInputs() {
-            document.getElementById('cause_people_hidden').value = activeCategory === 'people' ? JSON.stringify(selections) : '[]';
-            document.getElementById('cause_process_hidden').value = activeCategory === 'process' ? JSON.stringify(selections) : '[]';
-            document.getElementById('cause_it_systems_hidden').value = activeCategory === 'itSystems' ? JSON.stringify(selections) : '[]';
-            document.getElementById('cause_external_hidden').value = activeCategory === 'external' ? JSON.stringify(selections) : '[]';
+            document.getElementById('cause_people_hidden').value = activeCategory === 'people' ? JSON.stringify(selections) : (document.getElementById('cause_people_hidden').value || '[]');
+            document.getElementById('cause_process_hidden').value = activeCategory === 'process' ? JSON.stringify(selections) : (document.getElementById('cause_process_hidden').value || '[]');
+            document.getElementById('cause_it_systems_hidden').value = activeCategory === 'itSystems' ? JSON.stringify(selections) : (document.getElementById('cause_it_systems_hidden').value || '[]');
+            document.getElementById('cause_external_hidden').value = activeCategory === 'external' ? JSON.stringify(selections) : (document.getElementById('cause_external_hidden').value || '[]');
         }
-        
+
         function updateSelectionSummary() {
             const summaryDiv = document.getElementById('causeSelectionSummary');
             const summaryContent = document.getElementById('summaryContent');
             
-            if (selections.length > 0 && activeCategory) {
-                const categoryMap = {
-                    people: { title: 'People', icon: '👥' },
-                    process: { title: 'Process', icon: '⚙️' },
-                    itSystems: { title: 'IT Systems', icon: '💻' },
-                    external: { title: 'External Environment', icon: '🌍' }
-                };
+            let hasAnySelection = false;
+            let summaryHTML = '';
+
+            for (const category in causeData) {
+                const hiddenInputId = 'cause_' + (category === 'itSystems' ? 'it_systems' : category) + '_hidden';
+                const hiddenInput = document.getElementById(hiddenInputId);
                 
-                const category = categoryMap[activeCategory];
-                const summaryHTML = `<div style="margin-bottom: 10px;">
-                    <strong>${category.icon} ${category.title}:</strong><br>
-                    <span style="margin-left: 20px; color: #666;">${selections.join(', ')}</span>
-                </div>`;
-                
+                if (hiddenInput && hiddenInput.value) {
+                    const storedSelections = JSON.parse(hiddenInput.value || '[]');
+                    if (storedSelections.length > 0) {
+                        hasAnySelection = true;
+                        const categoryInfo = causeData[category];
+                        summaryHTML += `<div style="margin-bottom: 10px;">
+                            <strong>${categoryInfo.icon} ${categoryInfo.title}:</strong><br>
+                            <span style="margin-left: 20px; color: #666;">${storedSelections.join(', ')}</span>
+                        </div>`;
+                    }
+                }
+            }
+            
+            if (hasAnySelection) {
                 summaryContent.innerHTML = summaryHTML;
                 summaryDiv.style.display = 'block';
             } else {
@@ -1982,9 +2261,116 @@ if (empty($user['department']) || $user['department'] === null) {
             }
         });
 
+        // <CHANGE> Enhanced file upload with drag and drop functionality that accumulates files
+        function displayFileName() {
+            const filesList = document.getElementById('selectedFilesList');
+            const filesContainer = document.getElementById('filesContainer');
+            
+            if (selectedFiles.length > 0) {
+                filesContainer.innerHTML = '';
+                
+                selectedFiles.forEach((file, index) => {
+                    const fileSize = formatFileSize(file.size);
+                    const fileItem = document.createElement('div');
+                    fileItem.className = 'selected-file-item';
+                    fileItem.innerHTML = `
+                        <span class="selected-file-name">${file.name}</span>
+                        <span class="selected-file-size">${fileSize}</span>
+                        <button type="button" class="remove-file-btn" onclick="removeFile(${index})">Remove</button>
+                    `;
+                    filesContainer.appendChild(fileItem);
+                });
+                
+                filesList.classList.add('show');
+            } else {
+                filesList.classList.remove('show');
+            }
+        }
+
+        // Remove a specific file from the list
+        function removeFile(index) {
+            selectedFiles.splice(index, 1);
+            updateFileInput();
+            displayFileName();
+        }
+
+        // Update the file input with accumulated files
+        function updateFileInput() {
+            const fileInput = document.getElementById('fileInput');
+            const dt = new DataTransfer();
+            selectedFiles.forEach(file => {
+                dt.items.add(file);
+            });
+            fileInput.files = dt.files;
+        }
+
+        // Drag and drop functionality
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, highlight, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, unhighlight, false);
+        });
+
+        function highlight(e) {
+            dropZone.classList.add('drag-over');
+        }
+
+        function unhighlight(e) {
+            dropZone.classList.remove('drag-over');
+        }
+
+        dropZone.addEventListener('drop', handleDrop, false);
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const newFiles = dt.files;
+            
+            // Add new files to existing files array
+            for (let i = 0; i < newFiles.length; i++) {
+                selectedFiles.push(newFiles[i]);
+            }
+            
+            // Update the file input with all files
+            updateFileInput();
+            displayFileName();
+        }
+
+        // Handle file input change (click to browse)
+        fileInput.addEventListener('change', function() {
+            // Add newly selected files to the array
+            const newFiles = this.files;
+            for (let i = 0; i < newFiles.length; i++) {
+                selectedFiles.push(newFiles[i]);
+            }
+            
+            updateFileInput();
+            displayFileName();
+        });
+        // </CHANGE>
+
         document.addEventListener('DOMContentLoaded', function() {
             const successNotification = document.getElementById('successNotification');
             if (successNotification) {
+                if (window.location.search.includes('success=')) {
+                    const url = new URL(window.location);
+                    url.searchParams.delete('success');
+                    window.history.replaceState({}, document.title, url.pathname + url.search);
+                }
+                
                 setTimeout(function() {
                     successNotification.classList.add('fade-out');
                     setTimeout(function() {
@@ -1993,36 +2379,32 @@ if (empty($user['department']) || $user['department'] === null) {
                 }, 4000);
             }
 
-            const statsCard = document.getElementById('statsCard');
             const reportsSection = document.getElementById('reportsSection');
             if (reportsSection) {
                 reportsSection.style.display = 'block';
                 reportsSection.classList.add('show');
             }
-            if (statsCard && <?php echo count($user_risks); ?> > 0) {
-                statsCard.addEventListener('click', function() {
-                    toggleReports();
-                });
-            }
 
             for (const category in causeData) {
                 updateCauseCard(category);
-                updateHiddenInputs();
             }
             updateSelectionSummary();
+            
+            toggleMoneyRange(document.querySelector('input[name="involves_money_loss"]:checked'));
+            toggleGLPISection(document.querySelector('input[name="reported_to_glpi"]:checked'));
         });
 
         function toggleMoneyRange(radio) {
             const moneyRangeSection = document.getElementById('money-range-section');
             const moneyRangeSelect = document.querySelector('select[name="money_range"]');
             
-            if (radio.value === 'yes') {
+            if (radio && radio.value === 'yes') {
                 moneyRangeSection.classList.add('show');
                 moneyRangeSelect.required = true;
             } else {
                 moneyRangeSection.classList.remove('show');
                 moneyRangeSelect.required = false;
-                moneyRangeSelect.value = '';
+                if(moneyRangeSelect) moneyRangeSelect.value = '';
             }
         }
 
@@ -2030,30 +2412,38 @@ if (empty($user['department']) || $user['department'] === null) {
             const glpiSection = document.getElementById('glpi-ir-section');
             const glpiInput = document.querySelector('input[name="glpi_ir_number"]');
             
-            if (radio.value === 'yes') {
+            if (radio && radio.value === 'yes') {
                 glpiSection.classList.add('show');
                 glpiInput.required = true;
             } else {
                 glpiSection.classList.remove('show');
                 glpiInput.required = false;
-                glpiInput.value = '';
-            }
-        }
-
-        function displayFileName() {
-            const fileInput = document.getElementById('fileInput');
-            const fileLabel = document.getElementById('fileLabel');
-            
-            if (fileInput.files.length > 0) {
-                fileLabel.textContent = fileInput.files[0].name;
-            } else {
-                fileLabel.textContent = 'Click to upload supporting document';
+                if(glpiInput) glpiInput.value = '';
             }
         }
 
         function openReportModal() {
             document.getElementById('reportModal').classList.add('show');
             document.getElementById('reportModal').style.display = 'flex';
+            activeCategory = '';
+            selections = [];
+            // <CHANGE> Reset file selections when opening modal
+            selectedFiles = [];
+            displayFileName();
+            // </CHANGE>
+            document.querySelectorAll('.cause-card').forEach(card => {
+                card.classList.remove('has-selections');
+            });
+            document.getElementById('peopleCount').textContent = '0 selected';
+            document.getElementById('processCount').textContent = '0 selected';
+            document.getElementById('itSystemsCount').textContent = '0 selected';
+            document.getElementById('externalCount').textContent = '0 selected';
+            document.getElementById('causeSelectionSummary').style.display = 'none';
+            document.getElementById('summaryContent').innerHTML = '';
+            document.getElementById('cause_people_hidden').value = '[]';
+            document.getElementById('cause_process_hidden').value = '[]';
+            document.getElementById('cause_it_systems_hidden').value = '[]';
+            document.getElementById('cause_external_hidden').value = '[]';
         }
 
         function closeReportModal() {
@@ -2099,18 +2489,22 @@ if (empty($user['department']) || $user['department'] === null) {
         }
 
         function viewRisk(risk) {
+            console.log("viewRisk called with risk:", risk);
+            
             document.getElementById('modalRiskId').textContent = risk.risk_id || 'N/A';
             
             document.getElementById('modalRiskName').textContent = risk.risk_name || 'N/A';
             
-            let parsedCategories = JSON.parse(risk.risk_categories);
-            let categoryDisplay = '';
-            if (Array.isArray(parsedCategories)) {
-                categoryDisplay = parsedCategories.join(', ');
-            } else {
-                categoryDisplay = parsedCategories;
+            let parsedCategories = [];
+            try {
+                parsedCategories = JSON.parse(risk.risk_categories);
+                if (!Array.isArray(parsedCategories)) {
+                    parsedCategories = [risk.risk_categories];
+                }
+            } catch (e) {
+                parsedCategories = [risk.risk_categories];
             }
-            document.getElementById('modalRiskCategory').textContent = categoryDisplay;
+            document.getElementById('modalRiskCategory').textContent = parsedCategories.join(', ');
             
             document.getElementById('modalDateOccurrence').textContent = risk.date_of_occurrence || 'N/A';
             
@@ -2118,7 +2512,13 @@ if (empty($user['department']) || $user['department'] === null) {
             
             document.getElementById('modalRiskDescription').textContent = risk.risk_description || 'N/A';
             
-            let parsedCause = JSON.parse(risk.cause_of_risk);
+            let parsedCause = {};
+            try {
+                parsedCause = JSON.parse(risk.cause_of_risk) || {};
+            } catch (e) {
+                parsedCause = {};
+            }
+            
             let causeDisplay = '';
             for (const category in parsedCause) {
                 if (parsedCause[category].length > 0) {
@@ -2145,20 +2545,74 @@ if (empty($user['department']) || $user['department'] === null) {
                 document.getElementById('glpiNumberSection').style.display = 'none';
             }
             
-            document.getElementById('modalDateSubmitted').textContent = risk.created_at || 'N/A';
+            document.getElementById('modalDateSubmitted').textContent = risk.created_at ? new Date(risk.created_at).toLocaleDateString() : 'N/A';
             
             document.getElementById('modalAssignmentStatus').textContent = risk.risk_owner_id ? 'Assigned to Risk Owner' : 'Pending Assignment';
             
-            if (risk.document_path && risk.document_path !== '') {
-                document.getElementById('documentSection').style.display = 'block';
-                document.getElementById('documentLink').href = risk.document_path;
-                document.getElementById('documentLink').textContent = risk.document_filename || 'View Document';
+            const supportingDocs = risk.supporting_documents || [];
+            console.log("Supporting documents:", supportingDocs);
+            const docsList = document.getElementById('supportingDocumentsList');
+            
+            if (supportingDocs.length > 0) {
+                let tableHTML = `
+                    <table class="documents-table">
+                        <thead>
+                            <tr>
+                                <th>Document Name</th>
+                                <th>Type</th>
+                                <th>Size</th>
+                                <th>Uploaded By</th>
+                                <th>Uploaded At</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                supportingDocs.forEach(doc => {
+                    const fileSize = formatFileSize(doc.file_size);
+                    const uploadDate = new Date(doc.uploaded_at).toLocaleDateString();
+                    const fileExt = doc.mime_type ? doc.mime_type.split('/')[1].toUpperCase() : 'FILE';
+                    
+                    tableHTML += `
+                        <tr>
+                            <td>${doc.original_filename}</td>
+                            <td><span class="mime-type-badge">${fileExt}</span></td>
+                            <td><span class="file-size-badge">${fileSize}</span></td>
+                            <td>${doc.uploader_name || 'Unknown'}</td>
+                            <td>${uploadDate}</td>
+                            <td>
+                                <a href="?download_document=1&doc_id=${doc.id}" class="doc-download-link" target="_blank" download="${doc.original_filename}">
+                                    <svg class="doc-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                                    </svg>
+                                    Download
+                                </a>
+                            </td>
+                        </tr>
+                    `;
+                });
+                
+                tableHTML += `
+                        </tbody>
+                    </table>
+                `;
+                
+                docsList.innerHTML = tableHTML;
             } else {
-                document.getElementById('documentSection').style.display = 'none';
+                docsList.innerHTML = '<p style="color: #666; font-style: italic;">No supporting documents available</p>';
             }
             
             document.getElementById('riskModal').classList.add('show');
             document.getElementById('riskModal').style.display = 'flex';
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
         }
 
         function openChatbot() {
