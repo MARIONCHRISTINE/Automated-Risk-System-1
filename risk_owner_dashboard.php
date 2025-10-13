@@ -116,38 +116,27 @@ if ($_POST && isset($_POST['update_assessment'])) {
 }
 // Get current user info
 $user = getCurrentUser();
-// Debug: Ensure department is available
-if (empty($user['department'])) {
-    // Fallback: get department from session or database
-    if (isset($_SESSION['department'])) {
-        $user['department'] = $_SESSION['department'];
-    } else {
-        // Get department from database - try different possible column names
-        try {
-            $dept_query = "SELECT department, normalized_department, department_name FROM users WHERE id = :user_id";
-            $dept_stmt = $db->prepare($dept_query);
-            $dept_stmt->bindParam(':user_id', $_SESSION['user_id']);
-            $dept_stmt->execute();
-            $dept_result = $dept_stmt->fetch(PDO::FETCH_ASSOC);
-            if ($dept_result) {
-                // Try different possible column names
-                $user['department'] = $dept_result['normalized_department'] ?? 
-                                     $dept_result['department'] ?? 
-                                     $dept_result['department_name'] ?? 
-                                     'Unknown Department';
-            }
-        } catch (Exception $e) {
-            $user['department'] = 'Unknown Department';
-        }
+// Ensure department is available
+if (empty($user['department']) || $user['department'] === null) {
+    $dept_query = "SELECT department FROM users WHERE id = :user_id";
+    $dept_stmt = $db->prepare($dept_query);
+    $dept_stmt->bindParam(':user_id', $_SESSION['user_id']);
+    $dept_stmt->execute();
+    $dept_result = $dept_stmt->fetch(PDO::FETCH_ASSOC);
+    if ($dept_result && !empty($dept_result['department'])) {
+        $user['department'] = $dept_result['department'];
+        $_SESSION['department'] = $dept_result['department'];
     }
 }
+$department = $user['department'] ?? 'General';
+
 // Get comprehensive statistics
 $stats = [];
 // Risks in my department only - use the department column we determined exists
 try {
     $query = "SELECT COUNT(*) as total FROM risk_incidents WHERE $department_column = :department";
     $stmt = $db->prepare($query);
-    $stmt->bindParam(':department', $user['department']);
+    $stmt->bindParam(':department', $department); // Use the determined department
     $stmt->execute();
     $stats['department_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
 } catch (Exception $e) {
@@ -173,12 +162,16 @@ try {
 } catch (Exception $e) {
     $stats['my_reported_risks'] = 0;
 }
-// High/Critical risks assigned to me - use risk_level field
+// High/Critical risks assessed by me in my department - use risk_level field
 try {
     $query = "SELECT COUNT(*) as total FROM risk_incidents 
-              WHERE risk_owner_id = :user_id 
-              AND risk_level IN ('High', 'Critical')";
+              WHERE $department_column = :department
+              AND risk_level IN ('High', 'Critical')
+              AND (risk_owner_id = :user_id OR updated_by = :user_id)
+              AND risk_level IS NOT NULL
+              AND risk_level != 'Not Assessed'";
     $stmt = $db->prepare($query);
+    $stmt->bindParam(':department', $department); // Use the determined department
     $stmt->bindParam(':user_id', $_SESSION['user_id']);
     $stmt->execute();
     $stats['my_high_risks'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
@@ -220,7 +213,7 @@ try {
              WHERE ri.$department_column = :department 
              ORDER BY ri.created_at DESC";
     $stmt = $db->prepare($query);
-    $stmt->bindParam(':department', $user['department']);
+    $stmt->bindParam(':department', $department); // Use the determined department
     $stmt->execute();
     $department_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
@@ -262,45 +255,74 @@ try {
     $pending_assignments = [];
 }
 // Risk level distribution for department only - use the department column we determined exists
-try {
-    $query = "SELECT 
-        SUM(CASE WHEN risk_level = 'Low' THEN 1 ELSE 0 END) as low_risks, 
-        SUM(CASE WHEN risk_level = 'Medium' THEN 1 ELSE 0 END) as medium_risks, 
-        SUM(CASE WHEN risk_level = 'High' THEN 1 ELSE 0 END) as high_risks, 
-        SUM(CASE WHEN risk_level = 'Critical' THEN 1 ELSE 0 END) as critical_risks,
-        SUM(CASE WHEN risk_level IS NULL OR risk_level = 'Not Assessed' THEN 1 ELSE 0 END) as not_assessed_risks
-        FROM risk_incidents 
-        WHERE $department_column = :department";
-    $stmt = $db->prepare($query);
-    $stmt->bindParam(':department', $user['department']);
-    $stmt->execute();
-    $risk_levels = $stmt->fetch(PDO::FETCH_ASSOC);
-} catch (Exception $e) {
-    // Default values if query fails
-    $risk_levels = [
-        'low_risks' => 0,
-        'medium_risks' => 0,
-        'high_risks' => 0,
-        'critical_risks' => 0,
-        'not_assessed_risks' => 0
+// Initialize risk_levels to zeros
+$risk_levels = [
+    'low_risks' => 0,
+    'medium_risks' => 0,
+    'high_risks' => 0,
+    'critical_risks' => 0,
+    'not_assessed_risks' => 0
+];
+
+// Populate risk_levels from department_risks array
+foreach ($department_risks as $risk) {
+    $level = strtolower($risk['risk_level'] ?? '');
+    if ($level === 'low') {
+        $risk_levels['low_risks']++;
+    } elseif ($level === 'medium') {
+        $risk_levels['medium_risks']++;
+    } elseif ($level === 'high') {
+        $risk_levels['high_risks']++;
+    } elseif ($level === 'critical') {
+        $risk_levels['critical_risks']++;
+    } else {
+        // This catches null, empty strings, or 'Not Assessed' if it's not standardized
+        $risk_levels['not_assessed_risks']++;
+    }
+}
+
+// Risk category distribution for department with unique colors - use the department column we determined exists
+$risk_by_category = [];
+$category_counts = [];
+
+foreach ($department_risks as $risk) {
+    $categories_raw = $risk['risk_categories'] ?? '';
+    
+    if (!empty($categories_raw)) {
+        // Parse JSON array format like ["Category 1", "Category 2", "Category 3"]
+        $categories_array = json_decode($categories_raw, true);
+        
+        if (is_array($categories_array) && count($categories_array) > 0) {
+            // Get the first element
+            $first_element = $categories_array[0];
+            
+            // Check if it's an array (nested) or a string
+            if (is_array($first_element)) {
+                // Handle nested array case (double-encoded JSON)
+                $first_category = trim($first_element[0] ?? '');
+            } else {
+                // Handle normal string case
+                $first_category = trim($first_element);
+            }
+            
+            if (!empty($first_category)) {
+                if (!isset($category_counts[$first_category])) {
+                    $category_counts[$first_category] = 0;
+                }
+                $category_counts[$first_category]++;
+            }
+        }
+    }
+}
+
+// Convert to array format for chart
+foreach ($category_counts as $category => $count) {
+    $risk_by_category[] = [
+        'risk_categories' => $category,
+        'count' => $count
     ];
 }
-// Risk category distribution for department with unique colors - use the department column we determined exists
-try {
-    $category_query = "SELECT 
-        risk_categories, 
-        COUNT(*) as count 
-        FROM risk_incidents 
-        WHERE $department_column = :department 
-        GROUP BY risk_categories 
-        ORDER BY count DESC";
-    $category_stmt = $db->prepare($category_query);
-    $category_stmt->bindParam(':department', $user['department']);
-    $category_stmt->execute();
-    $risk_by_category = $category_stmt->fetchAll(PDO::FETCH_ASSOC);
-} catch (Exception $e) {
-    $risk_by_category = [];
-}
+
 // Generate unique colors for each category
 $category_colors = [
     '#E60012', // Airtel Red
@@ -433,7 +455,7 @@ function getBeautifulStatus($status) {
 try {
     $dept_risks_query = "SELECT COUNT(*) as total FROM risk_incidents WHERE $department_column = :department";
     $dept_risks_stmt = $db->prepare($dept_risks_query);
-    $dept_risks_stmt->bindParam(':department', $user['department']);
+    $dept_risks_stmt->bindParam(':department', $department); // Use the determined department
     $dept_risks_stmt->execute();
     $dept_risks_count = $dept_risks_stmt->fetch(PDO::FETCH_ASSOC)['total'];
 } catch (Exception $e) {
@@ -1727,7 +1749,7 @@ try {
                     <div class="user-avatar"><?php echo isset($_SESSION['full_name']) ? strtoupper(substr($_SESSION['full_name'], 0, 1)) : 'R'; ?></div>
                     <div class="user-details">
                         <div class="user-email"><?php echo isset($_SESSION['email']) ? $_SESSION['email'] : 'No Email'; ?></div>
-                        <div class="user-role">Risk_owner • <?php echo htmlspecialchars($user['department'] ?? 'No Department'); ?></div>
+                        <div class="user-role">Risk_owner • <?php echo htmlspecialchars($department); ?></div>
                     </div>
                     <a href="logout.php" class="logout-btn">Logout</a>
                 </div>
@@ -1785,7 +1807,7 @@ try {
                     <div class="stat-card" style="transition: transform 0.3s;">
                         <span class="stat-number"><?php echo $stats['department_risks']; ?></span>
                         <div class="stat-label">Department Risks</div>
-                        <div class="stat-description">All risks in <?php echo $user['department']; ?></div>
+                        <div class="stat-description">All risks in <?php echo htmlspecialchars($department); ?></div>
                     </div>
                     <div class="stat-card" style="transition: transform 0.3s;">
                         <span class="stat-number"><?php echo $stats['my_assigned_risks']; ?></span>
@@ -1793,12 +1815,14 @@ try {
                         <div class="stat-description">Risks assigned to you</div>
                     </div>
                     <div class="stat-card" style="transition: transform 0.3s;">
-                        <span class="stat-number"><?php echo $stats['my_high_risks']; ?></span>
+                        <!-- Ensure High/Critical Risks displays 0 instead of blank when no value -->
+                        <span class="stat-number"><?php echo isset($stats['my_high_risks']) ? (int)$stats['my_high_risks'] : 0; ?></span>
                         <div class="stat-label">High/Critical Risks</div>
-                        <div class="stat-description">High/Critical risks assessed by you</div>
+                        <div class="stat-description">High/Critical risks in your dept. assessed by you</div>
                     </div>
                     <div class="stat-card" style="transition: transform 0.3s;">
-                        <span class="stat-number"><?php echo $successfully_managed_count; ?></span>
+                        <!-- Ensure Successfully Managed Risks displays 0 instead of blank when no value -->
+                        <span class="stat-number"><?php echo isset($successfully_managed_count) ? (int)$successfully_managed_count : 0; ?></span>
                         <div class="stat-label">Successfully Managed Risks</div>
                         <div class="stat-description">Risks you have completed with proper assessment</div>
                     </div>
@@ -1872,7 +1896,7 @@ try {
                         <div id="department-overview-content" class="risk-tab-content active">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                                 <h4 style="margin: 0; color: #333;">Department Risks Overview</h4>
-                                <span style="color: #E60012; font-weight: 600;"><?php echo $dept_risks_count; ?> risks in <?php echo $user['department']; ?></span>
+                                <span style="color: #E60012; font-weight: 600;"><?php echo $dept_risks_count; ?> risks in <?php echo htmlspecialchars($department); ?></span>
                             </div>
                             
                             <?php if (empty($department_risks)): ?>
@@ -1903,8 +1927,8 @@ try {
                                                 echo $level == 'critical' ? '#dc3545' : ($level == 'high' ? '#fd7e14' : ($level == 'medium' ? '#ffc107' : ($level == 'low' ? '#28a745' : '#6c757d')));
                                             ?>;">
                                                 <td>
-                                                    <?php if (!empty($risk['custom_risk_id'])): ?>
-                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                                    <?php if (!empty($risk['risk_id'])): ?>
+                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['risk_id']); ?></span>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
@@ -2006,8 +2030,8 @@ try {
                                                 echo $level == 'critical' ? '#dc3545' : ($level == 'high' ? '#fd7e14' : ($level == 'medium' ? '#ffc107' : ($level == 'low' ? '#28a745' : '#6c757d')));
                                             ?>;">
                                                 <td>
-                                                    <?php if (!empty($risk['custom_risk_id'])): ?>
-                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                                    <?php if (!empty($risk['risk_id'])): ?>
+                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['risk_id']); ?></span>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
@@ -2120,8 +2144,8 @@ try {
                                             <?php foreach ($successfully_managed_risks as $risk): ?>
                                             <tr style="border-left: 4px solid #28a745;">
                                                 <td>
-                                                    <?php if (!empty($risk['custom_risk_id'])): ?>
-                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                                    <?php if (!empty($risk['risk_id'])): ?>
+                                                        <span class="risk-id-badge"><?php echo htmlspecialchars($risk['risk_id']); ?></span>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
@@ -2178,7 +2202,7 @@ try {
             <div id="risks-tab" class="tab-content">
                 <div class="card">
                     <div class="card-header">
-                        <h2 class="card-title">My Assigned Risks (<?php echo $user['department']; ?>)</h2>
+                        <h2 class="card-title">My Assigned Risks (<?php echo htmlspecialchars($department); ?>)</h2>
                         <span class="badge badge-info"><?php echo count($assigned_risks); ?> risks assigned to you</span>
                     </div>
                     <?php if (empty($assigned_risks)): ?>
@@ -2204,8 +2228,8 @@ try {
                                 <?php foreach ($assigned_risks as $risk): ?>
                                 <tr class="risk-row <?php echo getRiskLevel($risk); ?>" data-risk-id="<?php echo $risk['id']; ?>">
                                     <td>
-                                        <?php if (!empty($risk['custom_risk_id'])): ?>
-                                            <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                        <?php if (!empty($risk['risk_id'])): ?>
+                                            <span class="risk-id-badge"><?php echo htmlspecialchars($risk['risk_id']); ?></span>
                                         <?php endif; ?>
                                     </td>
                                     <td>
@@ -2246,7 +2270,7 @@ try {
             <div id="department-tab" class="tab-content">
                 <div class="card">
                     <div class="card-header">
-                        <h2 class="card-title">Department Risks (<?php echo $user['department']; ?>)</h2>
+                        <h2 class="card-title">Department Risks (<?php echo htmlspecialchars($department); ?>)</h2>
                         <span class="badge badge-info"><?php echo count($department_risks); ?> risks in your department</span>
                     </div>
                     <?php if (empty($department_risks)): ?>
@@ -2272,8 +2296,8 @@ try {
                                 <?php foreach ($department_risks as $risk): ?>
                                 <tr class="risk-row <?php echo getRiskLevel($risk); ?>" data-risk-id="<?php echo $risk['id']; ?>">
                                     <td>
-                                        <?php if (!empty($risk['custom_risk_id'])): ?>
-                                            <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                        <?php if (!empty($risk['risk_id'])): ?>
+                                            <span class="risk-id-badge"><?php echo htmlspecialchars($risk['risk_id']); ?></span>
                                         <?php endif; ?>
                                     </td>
                                     <td>
@@ -2417,8 +2441,8 @@ try {
                                     <?php foreach ($my_reported_risks as $risk): ?>
                                     <tr class="risk-report-row" data-status="<?php echo $risk['risk_status'] ?? 'pending'; ?>" data-search="<?php echo strtolower($risk['risk_name'] . ' ' . cleanCategoryName($risk['risk_categories'] ?? '')); ?>">
                                         <td style="padding: 1rem; border-left: 4px solid #E60012;">
-                                            <?php if (!empty($risk['custom_risk_id'])): ?>
-                                                <span class="risk-id-badge"><?php echo htmlspecialchars($risk['custom_risk_id']); ?></span>
+                                            <?php if (!empty($risk['risk_id'])): ?>
+                                                <span class="risk-id-badge"><?php echo htmlspecialchars($risk['risk_id']); ?></span>
                                             <?php endif; ?>
                                         </td>
                                         <td style="padding: 1rem;">
@@ -2647,7 +2671,7 @@ try {
                             ];
                             
                             foreach ($departments as $dept => $description) {
-                                if ($dept == $user['department']) {
+                                if ($dept == $department) { // Use the determined department
                                     echo "<div class='department-card' style='border-left-color: #E60012; background: #fff5f5;'>";
                                     echo "<div class='department-title' style='color: #E60012;'>🏢 {$dept} (Your Department)</div>";
                                     echo "<p style='margin: 0; color: #666;'>{$description}</p>";
