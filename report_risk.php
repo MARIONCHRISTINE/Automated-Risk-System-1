@@ -1,4 +1,81 @@
 <?php
+// Handle AJAX request for checking existing risks FIRST, before any HTML output
+if (isset($_GET['action']) && $_GET['action'] === 'check_existing_risks') {
+    // Only include necessary files for this endpoint
+    include_once 'config/database.php';
+    
+    header('Content-Type: application/json');
+    
+    try {
+        $database = new Database();
+        $db = $database->getConnection();
+        
+        $primary_risk = $_GET['primary_risk'] ?? '';
+        
+        if (empty($primary_risk)) {
+            echo json_encode(['success' => false, 'message' => 'Primary risk category is required']);
+            exit();
+        }
+        
+        // Check if we're in merge mode and need to exclude original risks
+        $exclude_risk_ids = [];
+        if (isset($_SESSION['merge_risk_ids']) && !empty($_SESSION['merge_risk_ids'])) {
+            $exclude_risk_ids = $_SESSION['merge_risk_ids'];
+        }
+        
+        // Query to find risks where the first element of risk_categories matches the primary risk
+        if (!empty($exclude_risk_ids)) {
+            $placeholders = implode(',', array_fill(0, count($exclude_risk_ids), '?'));
+            $query = "SELECT risk_id, risk_name, created_at, risk_categories 
+                      FROM risk_incidents 
+                      WHERE (JSON_UNQUOTE(JSON_EXTRACT(risk_categories, '$[0]')) = ?
+                             OR JSON_UNQUOTE(JSON_EXTRACT(risk_categories, '$[0][0]')) = ?)
+                      AND risk_id NOT IN ($placeholders)
+                      ORDER BY created_at DESC";
+            
+            $stmt = $db->prepare($query);
+            $params = array_merge([$primary_risk, $primary_risk], $exclude_risk_ids);
+            $stmt->execute($params);
+        } else {
+            $query = "SELECT risk_id, risk_name, created_at, risk_categories 
+                      FROM risk_incidents 
+                      WHERE (JSON_UNQUOTE(JSON_EXTRACT(risk_categories, '$[0]')) = ?
+                             OR JSON_UNQUOTE(JSON_EXTRACT(risk_categories, '$[0][0]')) = ?)
+                      ORDER BY created_at DESC";
+            
+            $stmt = $db->prepare($query);
+            $stmt->execute([$primary_risk, $primary_risk]);
+        }
+        
+        $existing_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Format the risks for display
+        $formatted_risks = array_map(function($risk) {
+            return [
+                'risk_id' => $risk['risk_id'],
+                'risk_name' => $risk['risk_name'],
+                'date_reported' => date('M j, Y', strtotime($risk['created_at']))
+            ];
+        }, $existing_risks);
+        
+        echo json_encode([
+            'success' => true,
+            'count' => count($existing_risks),
+            'risks' => $formatted_risks,
+            'is_new' => count($existing_risks) === 0
+        ]);
+        exit();
+        
+    } catch (Exception $e) {
+        echo json_encode([
+            'success' => false,
+            'message' => 'Database error: ' . $e->getMessage()
+        ]);
+        exit();
+    }
+}
+
+// Now include other files for normal page rendering
 include_once 'includes/auth.php';
 requireRole('risk_owner');
 include_once 'config/database.php';
@@ -9,6 +86,70 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['email'])) {
     header("Location: login.php");
     exit();
 }
+
+$database = new Database();
+$db = $database->getConnection();
+
+// Check if this is a merge operation
+$is_merge_mode = false;
+$merge_risks = [];
+$merged_risk_id = '';
+
+if (isset($_SESSION['merge_risk_ids']) && !empty($_SESSION['merge_risk_ids'])) {
+    echo "<script>console.log('[v0] Merge mode detected. Session merge_risk_ids:', " . json_encode($_SESSION['merge_risk_ids']) . ");</script>";
+    
+    $is_merge_mode = true;
+    $merge_risk_ids = $_SESSION['merge_risk_ids'];
+    
+    echo "<script>console.log('[v0] Merge mode active. Risk IDs to merge:', " . json_encode($merge_risk_ids) . ");</script>";
+    
+    // Fetch the selected risks from database using risk_id (not database id)
+    $placeholders = implode(',', array_fill(0, count($merge_risk_ids), '?'));
+    $merge_query = "SELECT id, risk_id, risk_name, risk_description, risk_categories, 
+                           inherent_risk_level, risk_status, date_of_occurrence, reported_by
+                    FROM risk_incidents 
+                    WHERE risk_id IN ($placeholders)
+                    ORDER BY risk_id DESC";
+    
+    $merge_stmt = $db->prepare($merge_query);
+    $merge_stmt->execute($merge_risk_ids);
+    $merge_risks = $merge_stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    echo "<script>console.log('[v0] Fetched merge risks from database:', " . json_encode($merge_risks) . ");</script>";
+    
+    // Generate merged risk ID by combining risk numbers
+    if (!empty($merge_risks)) {
+        // Extract year/month from first risk
+        $first_risk_id = $merge_risks[0]['risk_id'];
+        $parts = explode('/', $first_risk_id);
+        
+        if (count($parts) >= 4) {
+            $dept_initial = $parts[0];
+            $year = $parts[1];
+            $month = $parts[2];
+            
+            // Collect all risk sequence numbers (the last part of each risk ID)
+            $risk_numbers = [];
+            foreach ($merge_risks as $risk) {
+                $risk_parts = explode('/', $risk['risk_id']);
+                // Get the last part which is the sequence number
+                $risk_numbers[] = end($risk_parts);
+            }
+            
+            // Create merged risk ID: DEPT/YYYY/MM/##/##/##
+            $merged_risk_id = $dept_initial . '/' . $year . '/' . $month . '/' . implode('/', $risk_numbers);
+            
+            echo "<script>console.log('[v0] Generated merged risk ID:', '" . $merged_risk_id . "');</script>";
+        } else {
+            echo "<script>console.error('[v0] Invalid risk ID format:', '" . $first_risk_id . "');</script>";
+        }
+    } else {
+        echo "<script>console.error('[v0] No merge risks found in database!');</script>";
+    }
+} else {
+    echo "<script>console.log('[v0] Merge mode NOT detected. Session merge_risk_ids is empty or not set.');</script>";
+}
+
 
 if (isset($_GET['download_document']) && isset($_GET['doc_id'])) {
     $doc_id = $_GET['doc_id'];
@@ -45,53 +186,6 @@ if (isset($_GET['download_document']) && isset($_GET['doc_id'])) {
     }
 }
 
-if (isset($_GET['action']) && $_GET['action'] === 'check_existing_risks') {
-    header('Content-Type: application/json');
-    
-    $primary_risk = $_GET['primary_risk'] ?? '';
-    
-    if (empty($primary_risk)) {
-        echo json_encode(['success' => false, 'message' => 'Primary risk category is required']);
-        exit();
-    }
-    
-    $database = new Database();
-    $db = $database->getConnection();
-    
-    // Query to find risks where the first element of risk_categories matches the primary risk
-    $query = "SELECT risk_id, risk_name, created_at, risk_categories 
-              FROM risk_incidents 
-              WHERE (JSON_UNQUOTE(JSON_EXTRACT(risk_categories, '$[0]')) = :primary_risk
-                     OR JSON_UNQUOTE(JSON_EXTRACT(risk_categories, '$[0][0]')) = :primary_risk)
-              ORDER BY created_at DESC";
-    
-    $stmt = $db->prepare($query);
-    $stmt->bindParam(':primary_risk', $primary_risk);
-    $stmt->execute();
-    
-    $existing_risks = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    // Format the risks for display
-    $formatted_risks = array_map(function($risk) {
-        return [
-            'risk_id' => $risk['risk_id'],
-            'risk_name' => $risk['risk_name'],
-            'date_reported' => date('M j, Y', strtotime($risk['created_at']))
-        ];
-    }, $existing_risks);
-    
-    echo json_encode([
-        'success' => true,
-        'count' => count($existing_risks),
-        'risks' => $formatted_risks,
-        'is_new' => count($existing_risks) === 0
-    ]);
-    exit();
-}
-
-$database = new Database();
-$db = $database->getConnection();
-
 // Get current user info
 $user = getCurrentUser();
 
@@ -127,6 +221,7 @@ $error = '';
 if ($_POST && isset($_POST['cancel_risk'])) {
     // Clear any session data related to this form
     unset($_SESSION['form_data']);
+    unset($_SESSION['merge_risk_ids']);
     
     // Redirect to reload page with clear form
     header("Location: " . $_SERVER['PHP_SELF']);
@@ -181,20 +276,43 @@ function generateRiskId($db, $department) {
 }
 
 if ($_POST && isset($_POST['submit_risk_report'])) {
+    echo "<script>console.log('[v0] Form submitted. POST data received.');</script>";
+    echo "<script>console.log('[v0] Is merge mode:', " . ($is_merge_mode ? 'true' : 'false') . ");</script>";
+    echo "<script>console.log('[v0] Merged risk ID:', '" . $merged_risk_id . "');</script>";
+    
     // Handle risk report submission (new separate submission)
     try {
         $db->beginTransaction();
+        
+        echo "<script>console.log('[v0] Database transaction started.');</script>";
 
         // Validate required fields
         if (empty($_POST['risk_description']) || (empty($_POST['cause_people_hidden']) || $_POST['cause_people_hidden'] === '[]') && (empty($_POST['cause_process_hidden']) || $_POST['cause_process_hidden'] === '[]') && (empty($_POST['cause_it_systems_hidden']) || $_POST['cause_it_systems_hidden'] === '[]') && (empty($_POST['cause_external_hidden']) || $_POST['cause_external_hidden'] === '[]')) {
             throw new Exception('Risk description and at least one cause are required');
         }
         
+        echo "<script>console.log('[v0] Validation passed: risk description and causes.');</script>";
+        
         $inherent_likelihood = $_POST['inherent_likelihood_level'] ?? null;
         $inherent_impact = $_POST['inherent_impact_level'] ?? null;
         
         if (empty($inherent_likelihood) || empty($inherent_impact)) {
             throw new Exception('Likelihood and impact must be selected');
+        }
+        
+        echo "<script>console.log('[v0] Validation passed: likelihood and impact.');</script>";
+        
+        // Modified logic to use merged risk ID or generate new one
+        if ($is_merge_mode && !empty($merged_risk_id)) {
+            $generated_risk_id = $merged_risk_id;
+            echo "<script>console.log('[v0] Using merged risk ID:', '" . $generated_risk_id . "');</script>";
+        } else {
+            $generated_risk_id = generateRiskId($db, $user['department']);
+            echo "<script>console.log('[v0] Generated new risk ID:', '" . $generated_risk_id . "');</script>";
+        }
+        
+        if (!$generated_risk_id) {
+            throw new Exception("Failed to generate risk ID.");
         }
         
         $primary_risk_category_input = $_POST['risk_categories'] ?? '';
@@ -315,13 +433,17 @@ if ($_POST && isset($_POST['submit_risk_report'])) {
         }
         function calculateGeneralRiskLevel($score, $maxScale) {
             if ($maxScale == 0) return 'LOW'; 
-            $percentage = ($score / $maxScale) * 100;
             
-            if ($percentage >= 75) {
+            // Use the same thresholds as JavaScript for consistency
+            $lowThreshold = floor($maxScale * 3 / 16); // Approx 18.75%
+            $mediumThreshold = floor($maxScale * 7 / 16); // Approx 43.75%
+            $highThreshold = floor($maxScale * 11 / 16); // Approx 68.75%
+            
+            if ($score > $highThreshold) {
                 return 'CRITICAL';
-            } elseif ($percentage >= 50) {
+            } elseif ($score > $mediumThreshold) {
                 return 'HIGH';
-            } elseif ($percentage >= 25) {
+            } elseif ($score > $lowThreshold) {
                 return 'MEDIUM';
             } else {
                 return 'LOW';
@@ -405,12 +527,9 @@ if ($_POST && isset($_POST['submit_risk_report'])) {
         if (empty($uploaded_files)) {
             throw new Exception("At least one supporting document is mandatory. Please upload a file.");
         }
-        
-        // $supporting_document_paths = array_column($uploaded_files, 'path');
-        // $supporting_documents_json = json_encode($supporting_document_paths);
 
         $query = "INSERT INTO risk_incidents (
-            risk_name, risk_description, cause_of_risk, department, reported_by, risk_owner_id,
+            risk_id, risk_name, risk_description, cause_of_risk, department, reported_by, risk_owner_id,
             existing_or_new, risk_categories, date_of_occurrence, involves_money_loss, money_range, reported_to_glpi, glpi_ir_number,
             inherent_likelihood, inherent_consequence, 
             risk_rating, inherent_risk_level, residual_risk_level,
@@ -420,7 +539,7 @@ if ($_POST && isset($_POST['submit_risk_report'])) {
             risk_status,
             created_at, updated_at
         ) VALUES (
-            :risk_name, :risk_description, :cause_of_risk, :department, :reported_by, :risk_owner_id,
+            :risk_id, :risk_name, :risk_description, :cause_of_risk, :department, :reported_by, :risk_owner_id,
             :existing_or_new, :risk_categories, :date_of_occurrence, :involves_money_loss, :money_range, :reported_to_glpi, :glpi_ir_number,
             :inherent_likelihood, :inherent_consequence,
             :risk_rating, :inherent_risk_level, :residual_risk_level,
@@ -432,6 +551,7 @@ if ($_POST && isset($_POST['submit_risk_report'])) {
         )";
         
         $stmt = $db->prepare($query);
+        $stmt->bindParam(':risk_id', $generated_risk_id);
         $stmt->bindParam(':risk_name', $risk_name);
         $stmt->bindParam(':risk_description', $_POST['risk_description']);
         $stmt->bindParam(':cause_of_risk', $cause_of_risk_json);
@@ -462,19 +582,22 @@ if ($_POST && isset($_POST['submit_risk_report'])) {
         if ($stmt->execute()) {
             $risk_incident_id = $db->lastInsertId();
             
-            $generated_risk_id = generateRiskId($db, $user['department']);
+            echo "<script>console.log('[v0] Risk inserted successfully. New risk ID:', " . $risk_incident_id . ");</script>";
             
-            if ($generated_risk_id) {
-                $update_risk_id_query = "UPDATE risk_incidents SET risk_id = :risk_id WHERE id = :id";
-                $update_risk_id_stmt = $db->prepare($update_risk_id_query);
-                $update_risk_id_stmt->bindParam(':risk_id', $generated_risk_id);
-                $update_risk_id_stmt->bindParam(':id', $risk_incident_id);
+            if ($is_merge_mode && !empty($_SESSION['merge_risk_ids'])) {
+                echo "<script>console.log('[v0] Starting consolidation of original risks:', " . json_encode($_SESSION['merge_risk_ids']) . ");</script>";
                 
-                if (!$update_risk_id_stmt->execute()) {
-                    throw new Exception("Failed to update risk ID.");
+                $consolidate_placeholders = implode(',', array_fill(0, count($_SESSION['merge_risk_ids']), '?'));
+                $consolidate_query = "UPDATE risk_incidents 
+                                     SET risk_status = 'Consolidated', 
+                                         updated_at = NOW() 
+                                     WHERE risk_id IN ($consolidate_placeholders)";
+                $consolidate_stmt = $db->prepare($consolidate_query);
+                if (!$consolidate_stmt->execute($_SESSION['merge_risk_ids'])) {
+                    throw new Exception("Failed to update original risks to Consolidated status.");
                 }
-            } else {
-                throw new Exception("Failed to generate risk ID.");
+                
+                echo "<script>console.log('[v0] Successfully updated " . $consolidate_stmt->rowCount() . " risks to Consolidated status.');</script>";
             }
             
             $doc_query = "INSERT INTO risk_documents (
@@ -528,17 +651,27 @@ if ($_POST && isset($_POST['submit_risk_report'])) {
             
             $db->commit();
             
+            echo "<script>console.log('[v0] Transaction committed successfully.');</script>";
+            
+            unset($_SESSION['merge_risk_ids']);
+            
+            echo "<script>console.log('[v0] Session merge_risk_ids cleared.');</script>";
+            
             $_SESSION['success_message'] = "Risk report submitted successfully!";
             
             header("Location: risk_owner_dashboard.php");
             exit();
         } else {
             $db->rollback();
+            echo "<script>console.log('[v0] ERROR: Failed to execute INSERT statement.');</script>";
             $error = "Failed to submit risk report.";
-
         }
+        
     } catch (Exception $e) {
-        $db->rollback();
+        if ($db->inTransaction()) {
+            $db->rollback();
+        }
+        echo "<script>console.log('[v0] ERROR caught:', '" . addslashes($e->getMessage()) . "');</script>";
         $error = $e->getMessage();
     }
 }
@@ -835,7 +968,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             gap: 1rem;
         }
         
-        /* form-label styling to match the style */
+        /* Updated form-label styling to match the style from staff_dashboard.php */
         .form-label {
             display: block;
             margin-bottom: 0.8rem;
@@ -881,7 +1014,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             resize: vertical;
         }
         
-        /* Styling for single selection radio buttons */
+        /* Updated styling for single selection radio buttons */
         .risk-categories-container {
             background: #f8f9fa;
             border: 1px solid #ddd;
@@ -903,7 +1036,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             border-bottom: 2px solid #e3f2fd;
         }
 
-        /* Category name styling, color distinction for radio buttons */
+        /* Enhanced category name styling with color distinction for radio buttons */
         .radio-category-label {
             display: flex;
             align-items: center;
@@ -926,6 +1059,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             box-shadow: 0 4px 12px rgba(230, 0, 18, 0.3);
         }
 
+        /* Updated radio-category-label to handle both radio and checkbox inputs */
         .radio-category-label input[type="radio"],
         .radio-category-label input[type="checkbox"] {
             margin-right: 12px;
@@ -971,6 +1105,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             accent-color: #4caf50;
         }
 
+        /* 2x2 grid layout for impact levels */
         .impact-levels {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -980,7 +1115,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             padding: 10px;
         }
 
-        /* Square-styled radio buttons, distinct colors */
+        /* Square-styled radio buttons with distinct colors */
         .radio-label {
             display: flex;
             align-items: center;
@@ -1015,6 +1150,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             color: #2e7d32;
         }
 
+        /* CHANGE START: Added CSS for conditional sections, cause cards, and modals */
+        /* Conditional Section Styles */
         .conditional-section {
             display: none;
             margin-top: 15px;
@@ -1388,6 +1525,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 padding: 1.5rem;
             }
         }
+        /* CHANGE END */
         
         .risk-matrix {
             display: grid;
@@ -1498,8 +1636,9 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             accent-color: #E60012;
         }
 
+        /* Removed all treatment-related CSS */
         
-        /*Risk Description */
+        /* New styling for Risk Description textarea to match the category styling */
         .styled-textarea-container {
             background: #f8f9fa;
             border: 1px solid #ddd;
@@ -1529,12 +1668,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             transform: translateY(-1px);
         }
 
-        .styled-textarea:hover {
-            border-color: #c5c5c5;
-            background: linear-gradient(135deg, #fff, #fafafa);
-        }
-
-        /* File upload */
+        /* New styling for file upload to match the category styling */
         .styled-file-container {
             background: #f8f9fa;
             border: 1px solid #ddd;
@@ -1689,14 +1823,14 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             background-color: #ff4444;
         }
 
-        /* Unified secondary risk assessment styling */
+        /* Added unified secondary risk assessment styling */
         .secondary-risk-assessment {
             margin: 20px 0;
             padding: 20px;
             background: #fff;
-            border: 2px solid #6f42c1;
+            border: 2px solid #6f42c1; /* Using a distinct color for secondary risks */
             border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(111, 66, 193, 0.1);
+            box-shadow: 0 2px 8px rgba(111, 66, 193, 0.1); /* Shadow matching the border color */
         }
 
         .secondary-risk-header {
@@ -1783,10 +1917,13 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
         .next-risk-option input[type="radio"] {
             margin-right: 8px;
         }
+
+        /* Removed all treatment-related styling */
         
     </style>
     <style>
-            .modal {
+        /* Added missing modal styles for Risk Chain Modal */
+        .modal {
             display: none;
             position: fixed;
             z-index: 2000;
@@ -1905,9 +2042,9 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                 </li>
                 <li class="nav-item notification-nav-item">
                     <?php
-                    //if (isset($_SESSION['user_id'])) {
-                        //renderNotificationBar($all_notifications);
-                     //}
+                    // if (isset($_SESSION['user_id'])) {
+                    //     renderNotificationBar($all_notifications);
+                    // }
                     ?>
                 </li>
             </ul>
@@ -1917,7 +2054,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
     <div class="main-content">
         <div class="card">
             <div class="card-header">
-                <h2 class="card-title">Risk Registration Form</h2>
+                <h2 class="card-title"><?php echo $is_merge_mode ? 'Consolidate Risks' : 'Risk Registration Form'; ?></h2>
             </div>
             <div class="card-body">
                 
@@ -1939,6 +2076,23 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             <?php if (!$submitted_risk): ?>
                 <!-- Risk Assessment Form - Only show if risk not yet submitted -->
                 <form method="POST" enctype="multipart/form-data">
+                    <?php if ($is_merge_mode): ?>
+                        <div style="margin-bottom: 25px; padding: 20px; background: #f8f9fa; border-left: 4px solid #ffc107; border-radius: 8px;">
+                            <h4 style="color: #ffc107; margin-bottom: 15px;"><i class="fas fa-link"></i> Risks to be Consolidated</h4>
+                            <ul style="list-style: none; padding-left: 0; max-height: 200px; overflow-y: auto;">
+                                <?php foreach($merge_risks as $risk): ?>
+                                    <li style="margin-bottom: 8px; font-size: 0.95rem; color: #333;">
+                                        <strong><?php echo htmlspecialchars($risk['risk_id']); ?></strong> - <?php echo htmlspecialchars($risk['risk_name']); ?>
+                                    </li>
+                                <?php endforeach; ?>
+                            </ul>
+                            <p style="margin-top: 10px; font-size: 0.9rem; color: #666;">
+                                A new consolidated risk ID will be generated: <strong style="color: #E60012;"><?php echo htmlspecialchars($merged_risk_id); ?></strong>
+                            </p>
+                            <input type="hidden" name="merged_risk_id" value="<?php echo htmlspecialchars($merged_risk_id); ?>">
+                        </div>
+                    <?php endif; ?>
+
                     <div class="section-header">
                         <i class="fas fa-search"></i> Section 1: Risk Identification
                     </div>
@@ -2174,44 +2328,96 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     <div class="form-group">
                         <label class="form-label">a. Existing or New Risk *</label>
                         
-                         <!-- Placeholder state -->
-                        <div id="risk-detection-placeholder" style="padding: 20px; background: #f8f9fa; border: 2px dashed #dee2e6; border-radius: 8px; text-align: center; color: #6c757d;">
-                            <i class="fas fa-info-circle" style="font-size: 2rem; margin-bottom: 10px;"></i>
-                            <p style="margin: 0; font-weight: 500;">Please select a primary risk category in Section 1 to check for existing risks</p>
-                        </div>
-                        
-                         <!-- Loading state -->
-                        <div id="risk-detection-loading" style="display: none; padding: 20px; background: #e3f2fd; border: 2px solid #2196F3; border-radius: 8px; text-align: center;">
-                            <div style="display: inline-block; width: 20px; height: 20px; border: 3px solid #2196F3; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></div>
-                            <p style="margin: 10px 0 0 0; color: #1976D2; font-weight: 600;">Checking for existing risk in database...</p>
-                        </div>
-                        
-                         <!-- Result state - NEW RISK -->
-                        <div id="risk-detection-new" style="display: none; padding: 20px; background: #d4edda; border: 2px solid #28a745; border-radius: 8px; text-align: center;">
-                            <i class="fas fa-check-circle" style="font-size: 2rem; color: #28a745; margin-bottom: 10px;"></i>
-                            <h4 style="margin: 0; color: #155724; font-weight: 700;">NEW RISK</h4>
-                            <p style="margin: 5px 0 0 0; color: #155724;">No existing risks found with this category</p>
-                        </div>
-                        
-                         <!-- Result state - EXISTING RISK -->
-                        <div id="risk-detection-existing" style="display: none; padding: 20px; background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; text-align: center;">
-                            <i class="fas fa-exclamation-triangle" style="font-size: 2rem; color: #856404; margin-bottom: 10px;"></i>
-                            <h4 style="margin: 0; color: #856404; font-weight: 700;">EXISTING RISK</h4>
-                            <p style="margin: 5px 0 15px 0; color: #856404;"><span id="existing-risk-count">0</span> related risk(s) found in the database</p>
-                            <button type="button" onclick="openRiskChainModal()" style="background: #ffc107; color: #000; border: none; padding: 10px 20px; border-radius: 5px; font-weight: 600; cursor: pointer; transition: all 0.3s;">
-                                <i class="fas fa-link"></i> VIEW CHAIN
-                            </button>
-                        </div>
-                        
-                         <!-- Error state -->
-                        <div id="risk-detection-error" style="display: none; padding: 20px; background: #f8d7da; border: 2px solid #dc3545; border-radius: 8px; text-align: center;">
-                            <i class="fas fa-times-circle" style="font-size: 2rem; color: #721c24; margin-bottom: 10px;"></i>
-                            <h4 style="margin: 0; color: #721c24; font-weight: 700;">Unable to check</h4>
-                            <p style="margin: 5px 0 0 0; color: #721c24;">Please contact IT admin for assistance</p>
-                        </div>
-                        
-                         <!-- Hidden input to store the result for form submission -->
-                        <input type="hidden" name="existing_or_new" id="existing_or_new_value" required>
+                        <?php if ($is_merge_mode): ?>
+                             <!-- In merge mode, still show the automated check interface but with context -->
+                            <div style="margin-bottom: 20px; padding: 20px; background: #e3f2fd; border-left: 4px solid #2196F3; border-radius: 8px;">
+                                <h4 style="color: #2196F3; margin-bottom: 15px;">
+                                    <i class="fas fa-info-circle"></i> Consolidating Existing Risks
+                                </h4>
+                                <p style="margin: 0; color: #1976D2; font-weight: 600;">
+                                    The system will check if other risks with the same category exist (excluding the risks being merged).
+                                </p>
+                            </div>
+                            
+                             <!-- Placeholder state -->
+                            <div id="risk-detection-placeholder" style="padding: 20px; background: #f8f9fa; border: 2px dashed #dee2e6; border-radius: 8px; text-align: center; color: #6c757d;">
+                                <i class="fas fa-info-circle" style="font-size: 2rem; margin-bottom: 10px;"></i>
+                                <p style="margin: 0; font-weight: 500;">Please select a primary risk category in Section 1 to check for existing risks</p>
+                            </div>
+                            
+                             <!-- Loading state -->
+                            <div id="risk-detection-loading" style="display: none; padding: 20px; background: #e3f2fd; border: 2px solid #2196F3; border-radius: 8px; text-align: center;">
+                                <div style="display: inline-block; width: 20px; height: 20px; border: 3px solid #2196F3; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                                <p style="margin: 10px 0 0 0; color: #1976D2; font-weight: 600;">Checking for existing risk in database...</p>
+                            </div>
+                            
+                             <!-- Result state - NEW RISK -->
+                            <div id="risk-detection-new" style="display: none; padding: 20px; background: #d4edda; border: 2px solid #28a745; border-radius: 8px; text-align: center;">
+                                <i class="fas fa-check-circle" style="font-size: 2rem; color: #28a745; margin-bottom: 10px;"></i>
+                                <h4 style="margin: 0; color: #155724; font-weight: 700;">NEW RISK</h4>
+                                <p style="margin: 5px 0 0 0; color: #155724;">No other related risks found with this category (excluding consolidated risks)</p>
+                            </div>
+                            
+                             <!-- Result state - EXISTING RISK -->
+                            <div id="risk-detection-existing" style="display: none; padding: 20px; background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; text-align: center;">
+                                <i class="fas fa-exclamation-triangle" style="font-size: 2rem; color: #856404; margin-bottom: 10px;"></i>
+                                <h4 style="margin: 0; color: #856404; font-weight: 700;">EXISTING RISK</h4>
+                                <p style="margin: 5px 0 15px 0; color: #856404;"><span id="existing-risk-count">0</span> other related risk(s) found in the database</p>
+                                <button type="button" onclick="openRiskChainModal()" style="background: #ffc107; color: #000; border: none; padding: 10px 20px; border-radius: 5px; font-weight: 600; cursor: pointer; transition: all 0.3s;">
+                                    <i class="fas fa-link"></i> VIEW CHAIN
+                                </button>
+                            </div>
+                            
+                             <!-- Error state -->
+                            <div id="risk-detection-error" style="display: none; padding: 20px; background: #f8d7da; border: 2px solid #dc3545; border-radius: 8px; text-align: center;">
+                                <i class="fas fa-times-circle" style="font-size: 2rem; color: #721c24; margin-bottom: 10px;"></i>
+                                <h4 style="margin: 0; color: #721c24; font-weight: 700;">Unable to check</h4>
+                                <p style="margin: 5px 0 0 0; color: #721c24;">Please contact IT admin for assistance</p>
+                            </div>
+                            
+                             <!-- Hidden input to store the result for form submission -->
+                            <input type="hidden" name="existing_or_new" id="existing_or_new_value" required>
+                        <?php else: ?>
+                              <!-- Normal mode - show the automated check interface -->
+                             <!-- Placeholder state -->
+                            <div id="risk-detection-placeholder" style="padding: 20px; background: #f8f9fa; border: 2px dashed #dee2e6; border-radius: 8px; text-align: center; color: #6c757d;">
+                                <i class="fas fa-info-circle" style="font-size: 2rem; margin-bottom: 10px;"></i>
+                                <p style="margin: 0; font-weight: 500;">Please select a primary risk category in Section 1 to check for existing risks</p>
+                            </div>
+                            
+                             <!-- Loading state -->
+                            <div id="risk-detection-loading" style="display: none; padding: 20px; background: #e3f2fd; border: 2px solid #2196F3; border-radius: 8px; text-align: center;">
+                                <div style="display: inline-block; width: 20px; height: 20px; border: 3px solid #2196F3; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                                <p style="margin: 10px 0 0 0; color: #1976D2; font-weight: 600;">Checking for existing risk in database...</p>
+                            </div>
+                            
+                             <!-- Result state - NEW RISK -->
+                            <div id="risk-detection-new" style="display: none; padding: 20px; background: #d4edda; border: 2px solid #28a745; border-radius: 8px; text-align: center;">
+                                <i class="fas fa-check-circle" style="font-size: 2rem; color: #28a745; margin-bottom: 10px;"></i>
+                                <h4 style="margin: 0; color: #155724; font-weight: 700;">NEW RISK</h4>
+                                <p style="margin: 5px 0 0 0; color: #155724;">No existing risks found with this category</p>
+                            </div>
+                            
+                             <!-- Result state - EXISTING RISK -->
+                            <div id="risk-detection-existing" style="display: none; padding: 20px; background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; text-align: center;">
+                                <i class="fas fa-exclamation-triangle" style="font-size: 2rem; color: #856404; margin-bottom: 10px;"></i>
+                                <h4 style="margin: 0; color: #856404; font-weight: 700;">EXISTING RISK</h4>
+                                <p style="margin: 5px 0 15px 0; color: #856404;"><span id="existing-risk-count">0</span> related risk(s) found in the database</p>
+                                <button type="button" onclick="openRiskChainModal()" style="background: #ffc107; color: #000; border: none; padding: 10px 20px; border-radius: 5px; font-weight: 600; cursor: pointer; transition: all 0.3s;">
+                                    <i class="fas fa-link"></i> VIEW CHAIN
+                                </button>
+                            </div>
+                            
+                             <!-- Error state -->
+                            <div id="risk-detection-error" style="display: none; padding: 20px; background: #f8d7da; border: 2px solid #dc3545; border-radius: 8px; text-align: center;">
+                                <i class="fas fa-times-circle" style="font-size: 2rem; color: #721c24; margin-bottom: 10px;"></i>
+                                <h4 style="margin: 0; color: #721c24; font-weight: 700;">Unable to check</h4>
+                                <p style="margin: 5px 0 0 0; color: #721c24;">Please contact IT admin for assistance</p>
+                            </div>
+                            
+                             <!-- Hidden input to store the result for form submission -->
+                            <input type="hidden" name="existing_or_new" id="existing_or_new_value" required>
+                        <?php endif; ?>
                     </div>
 
                     <div class="form-group">
@@ -2413,7 +2619,6 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                         </div>
                     </div>
 
-
                     <!-- Form action buttons -->
                     <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 2rem;">
                         <button type="button" class="btn btn-secondary" onclick="clearEntireForm()">Cancel</button>
@@ -2461,6 +2666,9 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
         </div>
     </div>
 
+     <!-- Removed Add Treatment Modal completely -->
+
+     <!-- Removed Update Treatment Modal completely -->
 
      <!-- Risk Chain Modal -->
     <div id="riskChainModal" class="modal">
@@ -2481,18 +2689,18 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
     </div>
 
     <style>
-        /* CSS for spinning animation */
+        /* Added CSS for spinning animation */
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
         
-        /* CSS for risk chain modal items */
+        /* Added CSS for risk chain modal items */
         .risk-chain-item {
             padding: 15px;
             margin-bottom: 10px;
             background: #f8f9fa;
-            border-left: 4px solid #272623ff;
+            border-left: 4px solid #ffc107;
             border-radius: 4px;
             transition: all 0.3s;
         }
@@ -2802,6 +3010,8 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
             }
         }
 
+        // File upload with drag and drop functionality
+        // let selectedFiles = []; // moved to global scope
 
         function updateFileInput() {
             const fileInput = document.getElementById('fileInput');
