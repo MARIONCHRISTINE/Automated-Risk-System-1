@@ -2036,7 +2036,7 @@ $all_notifications = getNotifications($db, $_SESSION['user_id']);
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a href="risk-procedures.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'risk-procedures.php' ? 'active' : ''; ?>" target="_blank">
+                    <a href="risk_procedures.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'risk_procedures.php' ? 'active' : ''; ?>" target="_blank">
                         📋 Procedures
                     </a>
                 </li>

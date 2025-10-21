@@ -2240,7 +2240,7 @@ $all_statuses = ['Open', 'In Progress', 'Closed', 'Cancelled'];
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a href="javascript:void(0)" onclick="showTab('procedures')" class="<?php echo isset($_GET['tab']) && $_GET['tab'] == 'procedures' ? 'active' : ''; ?>">
+                        <a href="risk_procedures.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'risk_procedures.php' ? 'active' : ''; ?>">
                             📋 Procedures
                         </a>
                     </li>
@@ -2308,7 +2308,7 @@ $all_statuses = ['Open', 'In Progress', 'Closed', 'Cancelled'];
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                             <h3 class="card-title" style="margin: 0;">Risk Level Distribution</h3>
                             <div style="display: flex; gap: 0.5rem; background: #f0f0f0; padding: 0.25rem; border-radius: 8px;">
-                                <button id="inherentToggle" onclick="toggleRiskLevel('inherent')" style="padding: 0.5rem 1rem; border: none; background: #007bff; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.3s;">
+                                <button id="inherentToggle" onclick="toggleRiskLevel('inherent')" style="padding: 0.5rem 1rem; border: none; background: #e01212ff; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.3s;">
                                     Inherent
                                 </button>
                                 <button id="residualToggle" onclick="toggleRiskLevel('residual')" style="padding: 0.5rem 1rem; border: none; background: transparent; color: #666; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.3s;">
@@ -2898,13 +2898,10 @@ $all_statuses = ['Open', 'In Progress', 'Closed', 'Cancelled'];
                             ?>
                             
                             <?php if (empty($successfully_managed_risks)): ?>
-                                <div style="text-align: center; padding: 2rem; color: #666;">
-                                    <div style="font-size: 2rem; margin-bottom: 1rem;">🎯</div>
-                                    <h4>No successfully managed risks yet</h4>
-                                    <p>Risks you complete with proper risk assessment will appear here.</p>
-                                    <div style="background: #fff3cd; color: #856404; padding: 1rem; border-radius: 8px; margin-top: 1rem; text-align: left;">
-                                        <strong>Note:</strong> Only risks that have been properly assessed (with likelihood and impact ratings) and marked as completed will be shown here.
-                                    </div>
+                                <div style="text-align: center; padding: 3rem; color: #999;">
+                                    <i class="fas fa-trophy" style="font-size: 3rem; margin-bottom: 1rem; color: #ddd;"></i>
+                                    <p style="font-size: 1.1rem; margin: 0;">No successfully managed risks yet</p>
+                                    <p style="font-size: 0.9rem; margin-top: 0.5rem;">Closed risks with proper assessment will appear here</p>
                                 </div>
                             <?php else: ?>
                                 <div class="table-responsive">
@@ -3369,251 +3366,9 @@ $all_statuses = ['Open', 'In Progress', 'Closed', 'Cancelled'];
                 </div>
             </div>
             
-            <!-- Procedures Tab -->
-            <div id="procedures-tab" class="tab-content">
-                <div class="card">
-                    <div class="card-header">
-                        <h2 class="card-title">📋 Risk Management Procedures</h2>
-                        <p style="margin: 0; color: #666;">Complete guide for risk owners in the Airtel Risk Management System</p>
-                    </div>
-                    
-                    <!-- Table of Contents -->
-                    <div class="toc">
-                        <h3>📑 Table of Contents</h3>
-                        <ul>
-                            <li><a href="#role-overview">1. Risk Owner Role Overview</a></li>
-                            <li><a href="#risk-assessment">2. Risk Assessment Process</a></li>
-                            <li><a href="#risk-matrix">3. Risk Assessment Matrix</a></li>
-                            <li><a href="#department-management">4. Department Risk Management</a></li>
-                            <li><a href="#auto-assignment">5. Automatic Risk Assignment</a></li>
-                            <li><a href="#best-practices">6. Best Practices</a></li>
-                        </ul>
-                    </div>
-                    
-                    <!-- Role Overview -->
-                    <div class="procedure-section" id="role-overview">
-                        <h3 class="procedure-title">1. Risk Owner Role Overview</h3>
-                        <p>As a Risk Owner in the Airtel Risk Management System, you are responsible for managing risks within your department and ensuring proper risk assessment and treatment.</p>
-                        
-                        <h4>Key Responsibilities:</h4>
-                        <ul>
-                            <li><strong>Risk Assessment:</strong> Evaluate and rate risks assigned to you</li>
-                            <li><strong>Risk Treatment:</strong> Develop and implement risk mitigation strategies</li>
-                            <li><strong>Department Oversight:</strong> Monitor all risks within your department</li>
-                            <li><strong>Reporting:</strong> Report new risks discovered in your area</li>
-                            <li><strong>Status Updates:</strong> Keep risk statuses current and accurate</li>
-                        </ul>
-                    </div>
-                    
-                    <!-- Risk Assessment Process -->
-                    <div class="procedure-section" id="risk-assessment">
-                        <h3 class="procedure-title">2. Risk Assessment Process</h3>
-                        <p>The risk assessment process involves evaluating both the likelihood and impact of identified risks.</p>
-                        
-                        <h4>Assessment Fields:</h4>
-                        <div class="field-definition">
-                            <div class="field-name">Inherent Risk (Before Controls)</div>
-                            <div class="field-description">
-                                <strong>Inherent Likelihood:</strong> Probability of the risk occurring without any controls (1-5 scale)<br>
-                                <strong>Inherent Consequence:</strong> Impact if the risk occurs without controls (1-5 scale)
-                            </div>
-                        </div>
-                        
-                        <div class="field-definition">
-                            <div class="field-name">Residual Risk (After Controls)</div>
-                            <div class="field-description">
-                                <strong>Residual Likelihood:</strong> Probability after implementing controls (1-5 scale)<br>
-                                <strong>Residual Consequence:</strong> Impact after implementing controls (1-5 scale)
-                            </div>
-                        </div>
-                        
-                        <div class="field-definition">
-                            <div class="field-name">Current Risk Assessment</div>
-                            <div class="field-description">
-                                <strong>Probability:</strong> Current likelihood of occurrence (1-5 scale)<br>
-                                <strong>Impact:</strong> Current potential impact (1-5 scale)
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Risk Matrix -->
-                    <div class="procedure-section" id="risk-matrix">
-                        <h3 class="procedure-title">3. Risk Assessment Matrix</h3>
-                        <p>Use this matrix to determine risk levels based on likelihood and impact ratings:</p>
-                        
-                        <table class="risk-matrix-table">
-                            <thead>
-                                <tr>
-                                    <th>Impact →<br>Likelihood ↓</th>
-                                    <th>1 (Very Low)</th>
-                                    <th>2 (Low)</th>
-                                    <th>3 (Medium)</th>
-                                    <th>4 (High)</th>
-                                    <th>5 (Very High)</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <th>5 (Very Likely)</th>
-                                    <td class="matrix-2">5 - Medium</td>
-                                    <td class="matrix-3">10 - High</td>
-                                    <td class="matrix-4">15 - Critical</td>
-                                    <td class="matrix-5">20 - Critical</td>
-                                    <td class="matrix-5">25 - Critical</td>
-                                </tr>
-                                <tr>
-                                    <th>4 (Likely)</th>
-                                    <td class="matrix-2">4 - Medium</td>
-                                    <td class="matrix-2">8 - Medium</td>
-                                    <td class="matrix-3">12 - High</td>
-                                    <td class="matrix-4">16 - Critical</td>
-                                    <td class="matrix-5">20 - Critical</td>
-                                </tr>
-                                <tr>
-                                    <th>3 (Possible)</th>
-                                    <td class="matrix-1">3 - Low</td>
-                                    <td class="matrix-2">6 - Medium</td>
-                                    <td class="matrix-3">9 - High</td>
-                                    <td class="matrix-3">12 - High</td>
-                                    <td class="matrix-4">15 - Critical</td>
-                                </tr>
-                                <tr>
-                                    <th>2 (Unlikely)</th>
-                                    <td class="matrix-1">2 - Low</td>
-                                    <td class="matrix-2">4 - Medium</td>
-                                    <td class="matrix-2">6 - Medium</td>
-                                    <td class="matrix-2">8 - Medium</td>
-                                    <td class="matrix-3">10 - High</td>
-                                </tr>
-                                <tr>
-                                    <th>1 (Very Unlikely)</th>
-                                    <td class="matrix-1">1 - Low</td>
-                                    <td class="matrix-1">2 - Low</td>
-                                    <td class="matrix-1">3 - Low</td>
-                                    <td class="matrix-2">4 - Medium</td>
-                                    <td class="matrix-2">5 - Medium</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                        
-                        <h4>Risk Level Definitions:</h4>
-                        <ul>
-                            <li><strong>Low (1-3):</strong> Acceptable risk, monitor regularly</li>
-                            <li><strong>Medium (4-8):</strong> Manageable risk, implement controls</li>
-                            <li><strong>High (9-14):</strong> Significant risk, immediate action required</li>
-                            <li><strong>Critical (15-25):</strong> Unacceptable risk, urgent action required</li>
-                        </ul>
-                    </div>
-                    
-                    <!-- Department Management -->
-                    <div class="procedure-section" id="department-management">
-                        <h3 class="procedure-title">4. Department Risk Management</h3>
-                        <p>As a risk owner, you have access to manage risks within your specific department:</p>
-                        
-                        <div class="department-grid">
-                            <?php
-                            // Dynamically list departments based on user's department
-                            $departments = [
-                                'IT' => 'Information Technology risks including cybersecurity, system failures, and data breaches',
-                                'Finance' => 'Financial risks including fraud, compliance, and budget overruns',
-                                'Operations' => 'Operational risks including process failures and service disruptions',
-                                'HR' => 'Human resources risks including compliance and employee-related issues',
-                                'Legal' => 'Legal and regulatory compliance risks',
-                                'Marketing' => 'Marketing and brand reputation risks'
-                            ];
-                            
-                            // Display user's department prominently
-                            if (isset($departments[$department])) {
-                                echo "<div class='department-card' style='border-left-color: #E60012; background: #fff5f5;'>";
-                                echo "<div class='department-title' style='color: #E60012;'>🏢 {$department} (Your Department)</div>";
-                                echo "<p style='margin: 0; color: #666;'>{$departments[$department]}</p>";
-                                echo "</div>";
-                            }
-                            
-                            // Optionally list other departments or keep it focused on the user's dept.
-                            // For now, just display the user's department.
-                            ?>
-                        </div>
-                        
-                        <h4>Department Access Levels:</h4>
-                        <ul>
-                            <li><strong>View All Department Risks:</strong> See all risks reported within your department</li>
-                            <li><strong>Take Ownership:</strong> Assign unowned risks to yourself</li>
-                            <li><strong>Transfer Ownership:</strong> Reassign risks to other department members</li>
-                            <li><strong>Update Status:</strong> Change risk status and add progress notes</li>
-                        </ul>
-                    </div>
-                    
-                    <!-- Auto Assignment -->
-                    <div class="procedure-section" id="auto-assignment">
-                        <h3 class="procedure-title">5. Automatic Risk Assignment</h3>
-                        <p>The system automatically assigns risks to appropriate risk owners based on department and expertise:</p>
-                        
-                        <div class="auto-assignment-flow">
-                            <h4>🔄 Auto-Assignment Process:</h4>
-                            <div class="flow-step">
-                                <i class="fas fa-upload"></i>
-                                <span>Risk is reported by any user</span>
-                            </div>
-                            <div class="flow-step">
-                                <i class="fas fa-search"></i>
-                                <span>System identifies the risk category and department</span>
-                            </div>
-                            <div class="flow-step">
-                                <i class="fas fa-users"></i>
-                                <span>System finds available risk owners in that department</span>
-                            </div>
-                            <div class="flow-step">
-                                <i class="fas fa-user-check"></i>
-                                <span>Risk is automatically assigned to the most suitable risk owner</span>
-                            </div>
-                            <div class="flow-step">
-                                <i class="fas fa-bell"></i>
-                                <span>Risk owner receives notification of new assignment</span>
-                            </div>
-                        </div>
-                        
-                        <h4>Manual Override Options:</h4>
-                        <ul>
-                            <li><strong>Self-Assignment:</strong> Take ownership of unassigned risks in your department</li>
-                            <li><strong>Transfer:</strong> Reassign risks to other qualified team members</li>
-                            <li><strong>Escalation:</strong> Escalate complex risks to senior management</li>
-                            <li><strong>Regulatory Issues:</strong> Involve legal and compliance teams</li>
-                        </ul>
-                    </div>
-                    
-                    <!-- Best Practices -->
-                    <div class="procedure-section" id="best-practices">
-                        <h3 class="procedure-title">6. Best Practices</h3>
-                        
-                        <h4>🎯 Risk Assessment Best Practices:</h4>
-                        <ul>
-                            <li><strong>Be Objective:</strong> Base assessments on facts and data, not assumptions</li>
-                            <li><strong>Consider Context:</strong> Evaluate risks within the current business environment</li>
-                            <li><strong>Document Rationale:</strong> Explain your reasoning for risk ratings</li>
-                            <li><strong>Regular Reviews:</strong> Reassess risks periodically as conditions change</li>
-                            <li><strong>Stakeholder Input:</strong> Consult with relevant team members and experts</li>
-                        </ul>
-                        
-                        <h4>📊 Risk Management Best Practices:</h4>
-                        <ul>
-                            <li><strong>Prioritize by Impact:</strong> Focus on high and critical risks first</li>
-                            <li><strong>Develop Action Plans:</strong> Create specific, measurable mitigation strategies</li>
-                            <li><strong>Monitor Progress:</strong> Track implementation of risk treatments</li>
-                            <li><strong>Communicate Effectively:</strong> Keep stakeholders informed of risk status</li>
-                            <li><strong>Learn from Experience:</strong> Use past incidents to improve risk management</li>
-                        </ul>
-                        
-                        <h4>🚨 Escalation Guidelines:</h4>
-                        <ul>
-                            <li><strong>Critical Risks:</strong> Immediately escalate to senior management</li>
-                            <li><strong>Cross-Department Risks:</strong> Coordinate with other department risk owners</li>
-                            <li><strong>Resource Constraints:</strong> Escalation when additional resources are needed</li>
-                            <li><strong>Regulatory Issues:</strong> Involve legal and compliance teams</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
+            
+            <!-- Removed Procedures tab content -->
+            
         </main>
     </div>
     <script>
